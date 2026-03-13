@@ -26,7 +26,10 @@ class LT_Admin_Settings {
 
     public static function register_settings() {
         $options = [
+            'lt_shippo_provider',     // 'shippo' | 'shipstation'
             'lt_shippo_api_key',
+            'lt_ss_api_key',
+            'lt_ss_api_secret',
             'lt_shippo_from_address', // array
             'lt_shippo_default_weight',
             'lt_shippo_default_length',
@@ -42,38 +45,101 @@ class LT_Admin_Settings {
     }
 
     public static function render_page() {
+        $provider    = get_option( 'lt_shippo_provider', 'shippo' );
         $api_key     = get_option( 'lt_shippo_api_key', '' );
+        $ss_key      = get_option( 'lt_ss_api_key', '' );
+        $ss_secret   = get_option( 'lt_ss_api_secret', '' );
         $from        = get_option( 'lt_shippo_from_address', [] );
         $label_fmt   = get_option( 'lt_shippo_label_format', 'PDF' );
         $markup_pct  = get_option( 'lt_shippo_label_markup_pct', 0 );
+        $platform_ok = ( $provider === 'shippo' && $api_key ) || ( $provider === 'shipstation' && $ss_key && $ss_secret );
         ?>
         <div class="wrap">
-            <h1>Shippo Shipping Settings</h1>
+            <h1>Loothtool Shipping Settings</h1>
 
-            <?php if ( ! $api_key ) : ?>
+            <?php if ( ! $platform_ok ) : ?>
                 <div class="notice notice-warning">
-                    <p><strong>Enter your Shippo API key below to enable live rates.</strong>
-                    Get one free at <a href="https://goshippo.com" target="_blank">goshippo.com</a>.</p>
+                    <p><strong>Configure your platform shipping provider below to enable live rates.</strong></p>
                 </div>
             <?php endif; ?>
 
             <form method="post" action="options.php">
                 <?php settings_fields( 'lt_shippo_settings' ); ?>
 
-                <h2>API</h2>
+                <h2>Platform Shipping Provider</h2>
+                <p>This is the account the platform uses when vendors don't have their own connected. Vendors can connect their own Shippo or ShipStation account from their dashboard.</p>
                 <table class="form-table">
                     <tr>
-                        <th>Shippo API Key</th>
+                        <th>Provider</th>
                         <td>
-                            <input type="text" name="lt_shippo_api_key"
-                                   value="<?php echo esc_attr( $api_key ); ?>"
-                                   class="regular-text" placeholder="shippo_live_xxxxxxxx" />
-                            <p class="description">
-                                Found in your <a href="https://app.goshippo.com/settings/api" target="_blank">Shippo dashboard → API</a>.
-                                Use the <strong>live</strong> token for production; test token for dev.
-                            </p>
+                            <label style="margin-right:20px;">
+                                <input type="radio" name="lt_shippo_provider" value="shippo"
+                                       <?php checked( $provider, 'shippo' ); ?> id="lt-provider-shippo">
+                                <strong>Shippo</strong> — best for rate shopping across all carriers
+                            </label>
+                            <label>
+                                <input type="radio" name="lt_shippo_provider" value="shipstation"
+                                       <?php checked( $provider, 'shipstation' ); ?> id="lt-provider-ss">
+                                <strong>ShipStation</strong> — best if you already manage orders there
+                            </label>
                         </td>
                     </tr>
+                </table>
+
+                <div id="lt-admin-shippo-fields" <?php echo $provider !== 'shippo' ? 'style="display:none"' : ''; ?>>
+                    <h3>Shippo</h3>
+                    <table class="form-table">
+                        <tr>
+                            <th>Shippo API Key</th>
+                            <td>
+                                <input type="text" name="lt_shippo_api_key"
+                                       value="<?php echo esc_attr( $api_key ); ?>"
+                                       class="regular-text" placeholder="shippo_live_xxxxxxxx" />
+                                <p class="description">
+                                    Found in your <a href="https://app.goshippo.com/settings/api" target="_blank">Shippo dashboard → API</a>.
+                                    Use the <strong>live</strong> token for production; test token for dev.
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div id="lt-admin-ss-fields" <?php echo $provider !== 'shipstation' ? 'style="display:none"' : ''; ?>>
+                    <h3>ShipStation</h3>
+                    <table class="form-table">
+                        <tr>
+                            <th>ShipStation API Key</th>
+                            <td>
+                                <input type="text" name="lt_ss_api_key"
+                                       value="<?php echo esc_attr( $ss_key ); ?>"
+                                       class="regular-text" placeholder="API Key" />
+                            </td>
+                        </tr>
+                        <tr>
+                            <th>ShipStation API Secret</th>
+                            <td>
+                                <input type="password" name="lt_ss_api_secret"
+                                       value="<?php echo esc_attr( $ss_secret ); ?>"
+                                       class="regular-text" placeholder="API Secret" />
+                                <p class="description">
+                                    Found in ShipStation → Account Settings → API Keys. Both key and secret are required.
+                                </p>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+
+                <script>
+                document.querySelectorAll('input[name="lt_shippo_provider"]').forEach(function(radio) {
+                    radio.addEventListener('change', function() {
+                        document.getElementById('lt-admin-shippo-fields').style.display = this.value === 'shippo' ? '' : 'none';
+                        document.getElementById('lt-admin-ss-fields').style.display = this.value === 'shipstation' ? '' : 'none';
+                    });
+                });
+                </script>
+
+                <h2>Label Options</h2>
+                <table class="form-table">
                     <tr>
                         <th>Label Format</th>
                         <td>
@@ -92,9 +158,9 @@ class LT_Admin_Settings {
                                    value="<?php echo esc_attr( $markup_pct ); ?>"
                                    style="width:70px" /> %
                             <p class="description">
-                                Added on top of the Shippo label cost when deducting from the vendor's balance.
+                                Added on top of the label cost when deducting from the vendor's Dokan balance (platform account only — no markup when vendor uses their own account).
                                 E.g. <strong>10</strong> means a $5.00 label costs the vendor $5.50 — you keep the $0.50.
-                                Set to <strong>0</strong> to pass cost through at no markup.
+                                Set to <strong>0</strong> to pass costs through at no markup.
                             </p>
                         </td>
                     </tr>

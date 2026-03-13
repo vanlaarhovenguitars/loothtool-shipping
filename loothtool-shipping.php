@@ -13,6 +13,9 @@ define( 'LT_SHIPPING_URL', plugin_dir_url( __FILE__ ) );
 
 // Load sub-modules
 require_once LT_SHIPPING_PATH . 'includes/class-shippo-api.php';
+require_once LT_SHIPPING_PATH . 'includes/class-shipstation-api.php';
+require_once LT_SHIPPING_PATH . 'includes/class-vendor-credentials.php';
+require_once LT_SHIPPING_PATH . 'includes/class-provider-factory.php';
 require_once LT_SHIPPING_PATH . 'includes/class-cart-packages.php';
 require_once LT_SHIPPING_PATH . 'includes/class-shipping-method.php';
 require_once LT_SHIPPING_PATH . 'includes/class-admin-settings.php';

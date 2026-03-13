@@ -70,15 +70,25 @@ class LT_Vendor_Dashboard {
 
         echo '<h1 class="entry-title">Shipping Labels</h1>';
 
-        // Show the vendor their available balance so they know before buying.
-        $balance = self::get_vendor_available_balance( $vendor_id );
-        echo '<div style="background:#f1f1f1;border-left:4px solid #a42325;padding:12px 16px;margin-bottom:20px;">';
-        echo '<strong>Your available balance:</strong> $' . number_format( $balance, 2 ) . ' USD';
-        echo ' &nbsp;—&nbsp; Label costs are automatically deducted from this balance.';
-        echo '</div>';
+        // Render the "connect your own account" panel.
+        LT_Vendor_Credentials::render_connect_panel( $vendor_id );
 
-        if ( ! $api_key ) {
-            echo '<div class="dokan-alert dokan-alert-warning">Shipping labels are not configured yet. Please ask the site admin to add the Shippo API key.</div>';
+        // If vendor has their own account connected, no balance check needed.
+        $has_own_account = (bool) LT_Vendor_Credentials::get( $vendor_id );
+
+        if ( ! $has_own_account ) {
+            // Show the vendor their available balance so they know before buying.
+            $balance = self::get_vendor_available_balance( $vendor_id );
+            echo '<div style="background:#f1f1f1;border-left:4px solid #a42325;padding:12px 16px;margin-bottom:20px;">';
+            echo '<strong>Your available balance:</strong> $' . number_format( $balance, 2 ) . ' USD';
+            echo ' &nbsp;—&nbsp; Label costs are automatically deducted from this balance when using the platform account.';
+            echo '</div>';
+        }
+
+        // Check a platform provider exists (only matters if vendor has no own account).
+        $platform_ok = ! is_wp_error( LT_Provider_Factory::platform() );
+        if ( ! $has_own_account && ! $platform_ok ) {
+            echo '<div class="dokan-alert dokan-alert-warning">Shipping is not configured yet. Connect your own account above or ask the site admin to set up the platform shipping account.</div>';
             echo '</div></article></div></div>';
             return;
         }
@@ -212,21 +222,26 @@ class LT_Vendor_Dashboard {
             wp_send_json_error( 'Unauthorized.' );
         }
 
-        $api_key = get_option( 'lt_shippo_api_key', '' );
-        if ( ! $api_key ) {
-            wp_send_json_error( 'Shippo not configured.' );
+        // ── Resolve provider (vendor's own account or platform default) ────────
+        $context = LT_Provider_Factory::for_vendor( $vendor_id );
+        if ( is_wp_error( $context ) ) {
+            wp_send_json_error( $context->get_error_message() );
         }
 
-        // ── Balance check ────────────────────────────────────────────────────
-        // Look up the rate cost from the cached Shippo quote so the vendor
-        // can't pass a manipulated amount from the browser.
+        $provider          = $context['provider'];
+        $vendor_pays_direct = $context['vendor_pays_direct'];
+
+        // ── Find the cached rate object ──────────────────────────────────────
+        // We look it up server-side so the vendor cannot pass a fake price.
         $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
+        $rate_object  = null;
         $rate_amount  = 0.0;
         $rate_currency = 'USD';
 
         if ( $cached_rates ) {
             foreach ( $cached_rates as $rate ) {
                 if ( ( $rate['object_id'] ?? '' ) === $rate_id ) {
+                    $rate_object   = $rate;
                     $rate_amount   = (float) ( $rate['amount'] ?? 0 );
                     $rate_currency = $rate['currency'] ?? 'USD';
                     break;
@@ -234,34 +249,41 @@ class LT_Vendor_Dashboard {
             }
         }
 
-        // Apply platform markup (set in admin settings, default 0%).
-        $markup_pct  = (float) get_option( 'lt_shippo_label_markup_pct', 0 );
-        $charge_amount = $rate_amount * ( 1 + $markup_pct / 100 );
+        // ── Balance deduction (platform account only) ─────────────────────────
+        $charge_amount = 0.0;
 
-        // Deduct from vendor's Dokan balance before purchasing the label.
-        // If deduction fails (insufficient funds), abort.
-        if ( $charge_amount > 0 ) {
-            $deducted = self::deduct_vendor_balance(
-                $vendor_id,
-                $charge_amount,
-                $rate_currency,
-                sprintf( 'Shipping label – Order #%d (%s)', $order_id, $rate_id )
-            );
+        if ( ! $vendor_pays_direct ) {
+            // Apply platform markup.
+            $markup_pct    = (float) get_option( 'lt_shippo_label_markup_pct', 0 );
+            $charge_amount = $rate_amount * ( 1 + $markup_pct / 100 );
 
-            if ( is_wp_error( $deducted ) ) {
-                wp_send_json_error( $deducted->get_error_message() );
+            if ( $charge_amount > 0 ) {
+                $deducted = self::deduct_vendor_balance(
+                    $vendor_id,
+                    $charge_amount,
+                    $rate_currency,
+                    sprintf( 'Shipping label – Order #%d', $order_id )
+                );
+                if ( is_wp_error( $deducted ) ) {
+                    wp_send_json_error( $deducted->get_error_message() );
+                }
             }
         }
 
-        // ── Purchase label from Shippo ───────────────────────────────────────
+        // ── Purchase label ───────────────────────────────────────────────────
         $label_fmt = get_option( 'lt_shippo_label_format', 'PDF' );
-        $shippo    = new LT_Shippo_API( $api_key );
-        $txn       = $shippo->buy_label( $rate_id, $label_fmt );
 
-        // If Shippo fails, refund the balance deduction so the vendor isn't
-        // charged for a label they never received.
+        // ShipStation needs the full rate object to reconstruct the shipment.
+        // Shippo just needs the rate ID string.
+        $buy_arg = ( $context['type'] === 'shipstation' && $rate_object )
+            ? $rate_object
+            : $rate_id;
+
+        $txn = $provider->buy_label( $buy_arg, $label_fmt );
+
+        // If purchase fails, refund any balance already deducted.
         if ( is_wp_error( $txn ) || ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
-            if ( $charge_amount > 0 ) {
+            if ( ! $vendor_pays_direct && $charge_amount > 0 ) {
                 self::refund_vendor_balance(
                     $vendor_id,
                     $charge_amount,
@@ -286,12 +308,17 @@ class LT_Vendor_Dashboard {
         update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
         update_post_meta( $order_id, '_lt_shippo_label_cost_' . $vendor_id, $charge_amount );
 
+        if ( $vendor_pays_direct ) {
+            $billing_note = sprintf( 'Billed directly to vendor\'s own %s account.', strtoupper( $context['type'] ) );
+        } else {
+            $billing_note = sprintf( '$%.2f %s deducted from vendor balance.', $charge_amount, $rate_currency );
+        }
+
         $order->add_order_note(
             sprintf(
-                'Shipping label purchased by vendor #%d. Cost deducted from balance: $%.2f %s. Tracking: %s',
+                'Shipping label purchased by vendor #%d. %s Tracking: %s',
                 $vendor_id,
-                $charge_amount,
-                $rate_currency,
+                $billing_note,
                 $tracking_num
             )
         );
@@ -301,10 +328,11 @@ class LT_Vendor_Dashboard {
         }
 
         wp_send_json_success( [
-            'label_url'      => $label_url,
-            'tracking_num'   => $tracking_num,
-            'amount_charged' => number_format( $charge_amount, 2 ),
-            'currency'       => $rate_currency,
+            'label_url'          => $label_url,
+            'tracking_num'       => $tracking_num,
+            'amount_charged'     => $vendor_pays_direct ? '0.00' : number_format( $charge_amount, 2 ),
+            'currency'           => $rate_currency,
+            'vendor_pays_direct' => $vendor_pays_direct,
         ] );
     }
 

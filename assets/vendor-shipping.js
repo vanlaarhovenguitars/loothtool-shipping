@@ -99,4 +99,85 @@ jQuery(function ($) {
         $(this).addClass('active');
     });
 
+    // -------------------------------------------------------------------------
+    // Connect own shipping account — toggle Shippo / ShipStation fields
+    // -------------------------------------------------------------------------
+    $(document).on('change', 'input[name="lt_provider_type"]', function () {
+        var val = $(this).val();
+        $('#lt-shippo-fields').toggle(val === 'shippo');
+        $('#lt-ss-fields').toggle(val === 'shipstation');
+    });
+
+    // Connect account form submit
+    $(document).on('submit', '#lt-connect-account-form', function (e) {
+        e.preventDefault();
+
+        var $form   = $(this);
+        var $msg    = $('#lt-connect-msg');
+        var $btn    = $('#lt-connect-submit');
+        var type    = $form.find('input[name="lt_provider_type"]:checked').val();
+        var apiKey  = type === 'shipstation'
+            ? $form.find('input[name="lt_ss_key"]').val()
+            : $form.find('input[name="lt_api_key"]').val();
+        var secret  = $form.find('input[name="lt_ss_secret"]').val();
+        var nonce   = $form.find('input[name="lt_creds_nonce"]').val();
+
+        if (!apiKey) {
+            $msg.css('color', 'red').text('API key is required.');
+            return;
+        }
+
+        $btn.prop('disabled', true).text('Verifying…');
+        $msg.css('color', '').text('');
+
+        $.post(ltShipping.ajaxUrl, {
+            action:           'lt_save_vendor_credentials',
+            lt_provider_type: type,
+            lt_api_key:       apiKey,
+            lt_ss_key:        apiKey,
+            lt_ss_secret:     secret,
+            lt_creds_nonce:   nonce,
+        })
+        .done(function (res) {
+            if (res.success) {
+                $msg.css('color', 'green').text('');
+                // Reload page to show connected state.
+                window.location.reload();
+            } else {
+                $msg.css('color', 'red').text('Error: ' + res.data);
+                $btn.prop('disabled', false).text('Connect & Verify');
+            }
+        })
+        .fail(function () {
+            $msg.css('color', 'red').text('Network error. Please try again.');
+            $btn.prop('disabled', false).text('Connect & Verify');
+        });
+    });
+
+    // Disconnect account
+    $(document).on('click', '#lt-remove-account', function (e) {
+        e.preventDefault();
+
+        if (!confirm('Disconnect your shipping account? You will use the platform account instead.')) {
+            return;
+        }
+
+        var nonce = $(this).data('nonce');
+
+        $.post(ltShipping.ajaxUrl, {
+            action: 'lt_remove_vendor_credentials',
+            nonce:  nonce,
+        })
+        .done(function (res) {
+            if (res.success) {
+                window.location.reload();
+            } else {
+                alert('Error: ' + res.data);
+            }
+        });
+    });
+
+    // Success message: update balance line if vendor pays direct
+    // (handled inline in the done handler for buy_label above)
+
 });

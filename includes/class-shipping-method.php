@@ -45,12 +45,13 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
      * Called by WooCommerce for each package (one per vendor after our splitter runs).
      */
     public function calculate_shipping( $package = [] ) {
-        $api_key = get_option( 'lt_shippo_api_key', '' );
-        if ( empty( $api_key ) ) {
-            return; // Silently skip — admin hasn't set the API key yet.
-        }
-
         $vendor_id = $package['vendor_id'] ?? 0;
+
+        // Get the right provider for this vendor (their own account or platform default).
+        $context = LT_Provider_Factory::for_vendor( $vendor_id );
+        if ( is_wp_error( $context ) ) {
+            return; // No provider configured — silently skip.
+        }
 
         // Build from-address from Dokan vendor profile.
         $from = $this->get_vendor_from_address( $vendor_id );
@@ -72,9 +73,7 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
         // Estimate parcel dimensions from package contents.
         $parcel = $this->estimate_parcel( $package['contents'] );
 
-        // Call Shippo.
-        $shippo = new LT_Shippo_API( $api_key );
-        $rates  = $shippo->get_rates( $from, $to, $parcel );
+        $rates = $context['provider']->get_rates( $from, $to, $parcel );
 
         if ( is_wp_error( $rates ) || empty( $rates ) ) {
             return;
