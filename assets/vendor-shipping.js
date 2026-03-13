@@ -180,4 +180,32 @@ jQuery(function ($) {
     // Success message: update balance line if vendor pays direct
     // (handled inline in the done handler for buy_label above)
 
+    // -------------------------------------------------------------------------
+    // Label format preference — auto-save on radio change
+    // -------------------------------------------------------------------------
+    $(document).on('change', '.lt-format-radio', function () {
+        var format = $(this).val();
+        var nonce  = $('input[name="lt_format_nonce"]').val();
+        var $msg   = $('#lt-format-msg');
+
+        $msg.text('Saving…');
+
+        $.post(ltShipping.ajaxUrl, {
+            action:           'lt_save_label_format',
+            lt_label_format:  format,
+            lt_format_nonce:  nonce,
+        })
+        .done(function (res) {
+            if (res.success) {
+                $msg.text(format === '' ? 'Using platform default.' : 'Saved.');
+                setTimeout(function () { $msg.text(''); }, 2000);
+            } else {
+                $msg.css('color', 'red').text('Error saving preference.');
+            }
+        })
+        .fail(function () {
+            $msg.css('color', 'red').text('Network error.');
+        });
+    });
+
 });

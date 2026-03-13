@@ -141,13 +141,25 @@ class LT_Admin_Settings {
                 <h2>Label Options</h2>
                 <table class="form-table">
                     <tr>
-                        <th>Label Format</th>
+                        <th>Default Label Format</th>
                         <td>
-                            <select name="lt_shippo_label_format">
-                                <?php foreach ( [ 'PDF', 'PNG', 'ZPLII' ] as $fmt ) : ?>
-                                    <option value="<?php echo $fmt; ?>" <?php selected( $label_fmt, $fmt ); ?>><?php echo $fmt; ?></option>
-                                <?php endforeach; ?>
-                            </select>
+                            <?php
+                            $formats = [
+                                'PDF'      => 'Full Page PDF (8.5&Prime; &times; 11&Prime;) — no label printer needed, print on regular paper',
+                                'PDF_4x6'  => '4&Prime; &times; 6&Prime; PDF — for label printers (Rollo, Dymo 4XL, etc.)',
+                                'ZPLII'    => 'ZPL / Thermal — for Zebra and compatible thermal printers',
+                            ];
+                            foreach ( $formats as $val => $desc ) : ?>
+                                <label style="display:block;margin-bottom:6px;">
+                                    <input type="radio" name="lt_shippo_label_format"
+                                           value="<?php echo esc_attr( $val ); ?>"
+                                           <?php checked( $label_fmt, $val ); ?>>
+                                    <?php echo $desc; ?>
+                                </label>
+                            <?php endforeach; ?>
+                            <p class="description" style="margin-top:6px;">
+                                Vendors can override this with their own preference from their Shipping Labels dashboard.
+                            </p>
                         </td>
                     </tr>
                     <tr>

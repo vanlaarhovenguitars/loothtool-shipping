@@ -19,7 +19,8 @@ class LT_Vendor_Dashboard {
         add_action( 'wp_enqueue_scripts',         [ __CLASS__, 'enqueue_assets' ] );
 
         // AJAX handler for buying a label.
-        add_action( 'wp_ajax_lt_buy_label',       [ __CLASS__, 'ajax_buy_label' ] );
+        add_action( 'wp_ajax_lt_buy_label',          [ __CLASS__, 'ajax_buy_label' ] );
+        add_action( 'wp_ajax_lt_save_label_format',  [ __CLASS__, 'ajax_save_label_format' ] );
     }
 
     // -------------------------------------------------------------------------
@@ -72,6 +73,9 @@ class LT_Vendor_Dashboard {
 
         // Render the "connect your own account" panel.
         LT_Vendor_Credentials::render_connect_panel( $vendor_id );
+
+        // Render label format preference panel.
+        self::render_label_format_panel( $vendor_id );
 
         // If vendor has their own account connected, no balance check needed.
         $has_own_account   = (bool) LT_Vendor_Credentials::get( $vendor_id );
@@ -292,7 +296,7 @@ class LT_Vendor_Dashboard {
         }
 
         // ── Purchase label ───────────────────────────────────────────────────
-        $label_fmt = get_option( 'lt_shippo_label_format', 'PDF' );
+        $label_fmt = self::get_vendor_label_format( $vendor_id );
 
         // ShipStation needs the full rate object to reconstruct the shipment.
         // Shippo just needs the rate ID string.
@@ -512,6 +516,74 @@ class LT_Vendor_Dashboard {
         }
 
         return $orders;
+    }
+
+    /**
+     * Render the label format preference panel shown on the vendor dashboard.
+     */
+    private static function render_label_format_panel( int $vendor_id ): void {
+        $saved = get_user_meta( $vendor_id, '_lt_label_format', true ) ?: '';
+        $formats = [
+            ''        => 'Platform default (set by admin)',
+            'PDF'     => 'Full Page PDF (8.5" × 11") — no label printer, print on regular paper',
+            'PDF_4x6' => '4" × 6" PDF — label printer (Rollo, Dymo 4XL, etc.)',
+            'ZPLII'   => 'ZPL / Thermal — Zebra or compatible thermal printer',
+        ];
+        ?>
+        <div class="lt-label-format-panel" style="border:1px solid #e6e6e6;padding:20px;margin-bottom:28px;border-radius:4px;">
+            <h3 style="margin-top:0;">Label Format</h3>
+            <p style="margin-bottom:12px;">Choose how your shipping labels are generated. Select the option that matches your printer setup.</p>
+            <?php wp_nonce_field( 'lt_label_format', 'lt_format_nonce' ); ?>
+            <?php foreach ( $formats as $val => $desc ) : ?>
+                <label style="display:block;margin-bottom:8px;cursor:pointer;">
+                    <input type="radio" name="lt_label_format_choice" value="<?php echo esc_attr( $val ); ?>"
+                           class="lt-format-radio" <?php checked( $saved, $val ); ?>>
+                    <?php echo esc_html( $desc ); ?>
+                </label>
+            <?php endforeach; ?>
+            <p id="lt-format-msg" style="margin-top:8px;font-style:italic;color:#555;"></p>
+        </div>
+        <?php
+    }
+
+    // -------------------------------------------------------------------------
+    // AJAX: save vendor label format preference
+    // -------------------------------------------------------------------------
+
+    public static function ajax_save_label_format(): void {
+        check_ajax_referer( 'lt_label_format', 'lt_format_nonce' );
+
+        $vendor_id = (int) dokan_get_current_user_id();
+        if ( ! $vendor_id ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        $allowed = [ '', 'PDF', 'PDF_4x6', 'ZPLII' ];
+        $format  = sanitize_text_field( $_POST['lt_label_format'] ?? '' );
+
+        if ( ! in_array( $format, $allowed, true ) ) {
+            wp_send_json_error( 'Invalid format.' );
+        }
+
+        if ( $format === '' ) {
+            delete_user_meta( $vendor_id, '_lt_label_format' );
+        } else {
+            update_user_meta( $vendor_id, '_lt_label_format', $format );
+        }
+
+        wp_send_json_success();
+    }
+
+    /**
+     * Get the label format to use for a vendor.
+     * Uses vendor's own preference if set, falls back to platform admin setting.
+     */
+    private static function get_vendor_label_format( int $vendor_id ): string {
+        $vendor_pref = get_user_meta( $vendor_id, '_lt_label_format', true );
+        if ( $vendor_pref ) {
+            return $vendor_pref;
+        }
+        return get_option( 'lt_shippo_label_format', 'PDF' );
     }
 
     /**
