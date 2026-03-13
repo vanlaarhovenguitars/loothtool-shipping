@@ -74,9 +74,21 @@ class LT_Vendor_Dashboard {
         LT_Vendor_Credentials::render_connect_panel( $vendor_id );
 
         // If vendor has their own account connected, no balance check needed.
-        $has_own_account = (bool) LT_Vendor_Credentials::get( $vendor_id );
+        $has_own_account   = (bool) LT_Vendor_Credentials::get( $vendor_id );
+        $vendor_country    = self::get_vendor_store_country( $vendor_id );
+        $is_international  = ( $vendor_country && $vendor_country !== 'US' );
 
-        if ( ! $has_own_account ) {
+        // International vendors without their own account: show a hard requirement notice.
+        if ( $is_international && ! $has_own_account ) {
+            echo '<div class="dokan-alert dokan-alert-warning" style="border-left:4px solid #e67e22;background:#fef9f0;padding:14px 18px;margin-bottom:20px;">';
+            echo '<strong>Connect your own shipping account to purchase labels.</strong><br>';
+            echo 'Vendors outside the US must use their own Shippo or ShipStation account. ';
+            echo 'Rate estimates are still shown at checkout, but label purchases must go through your own account. ';
+            echo 'Use the panel above to connect your account.';
+            echo '</div>';
+        }
+
+        if ( ! $has_own_account && ! $is_international ) {
             // Show the vendor their available balance so they know before buying.
             $balance = self::get_vendor_available_balance( $vendor_id );
             echo '<div style="background:#f1f1f1;border-left:4px solid #a42325;padding:12px 16px;margin-bottom:20px;">';
@@ -228,8 +240,17 @@ class LT_Vendor_Dashboard {
             wp_send_json_error( $context->get_error_message() );
         }
 
-        $provider          = $context['provider'];
+        $provider           = $context['provider'];
         $vendor_pays_direct = $context['vendor_pays_direct'];
+
+        // ── International vendor check ───────────────────────────────────────
+        // Non-US vendors must use their own account — no platform billing.
+        if ( ! $vendor_pays_direct ) {
+            $vendor_country = self::get_vendor_store_country( $vendor_id );
+            if ( $vendor_country && $vendor_country !== 'US' ) {
+                wp_send_json_error( 'International vendors must connect their own Shippo or ShipStation account to purchase labels. Connect your account in the Shipping Labels dashboard.' );
+            }
+        }
 
         // ── Find the cached rate object ──────────────────────────────────────
         // We look it up server-side so the vendor cannot pass a fake price.
@@ -491,6 +512,19 @@ class LT_Vendor_Dashboard {
         }
 
         return $orders;
+    }
+
+    /**
+     * Get the 2-letter country code from the vendor's Dokan store address.
+     * Returns null if Dokan is not active or the vendor has no address set.
+     */
+    private static function get_vendor_store_country( int $vendor_id ): ?string {
+        if ( ! function_exists( 'dokan_get_store_info' ) ) {
+            return null;
+        }
+        $info    = dokan_get_store_info( $vendor_id );
+        $country = $info['address']['country'] ?? '';
+        return $country ? strtoupper( $country ) : null;
     }
 }
 
