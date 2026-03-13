@@ -32,7 +32,8 @@ The platform owner picks one as the default. Vendors can also connect their own 
 - After an order comes in, the vendor clicks **Get Shipping Rates** to fetch live carrier options for that order
 - The vendor selects a rate and clicks **Buy Label** — the label is purchased instantly
 - Tracking number is saved to the order and shown to the customer on their order detail page
-- Labels downloadable as PDF, PNG, or ZPL (thermal printer format)
+- Each vendor chooses their **label format** from the dashboard — no label printer (full page PDF), label printer (4×6 PDF), or ZPL thermal
+- Labels downloadable as Full Page PDF (8.5×11), 4×6 PDF, or ZPL
 
 ### Vendor Direct Billing — Connect Your Own Account
 Vendors can connect their own Shippo or ShipStation account from the Shipping Labels dashboard:
@@ -66,7 +67,7 @@ When a vendor uses the platform shipping account (no own account connected):
 - Set a default ship-from address (fallback when a vendor hasn't filled in their store address)
 - Configure default parcel dimensions and weight
 - Set a platform markup % on label purchases (platform account only)
-- Choose label format: PDF, PNG, or ZPLII
+- Set default label format: **Full Page PDF** (8.5×11, no special printer), **4×6 PDF** (label printers like Rollo/Dymo 4XL), or **ZPL/Thermal** (Zebra etc.) — vendors can override this individually from their dashboard
 
 ---
 
