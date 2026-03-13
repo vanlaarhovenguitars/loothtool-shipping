@@ -41,6 +41,15 @@ Vendors can connect their own Shippo or ShipStation account from the Shipping La
 - **When not connected:** labels go through the platform account with automatic Dokan balance deduction (see below)
 - API keys are encrypted at rest using AES-256-CBC with the WordPress auth salt
 
+### International Vendor Requirement
+Vendors with a store address **outside the United States** must connect their own Shippo or ShipStation account:
+
+- Rate estimates at checkout still work for all vendors regardless of country
+- Label purchases through the platform account are restricted to US-based vendors only
+- International vendors see a notice on their Shipping Labels dashboard directing them to connect their own account
+- If an international vendor attempts to buy a label without their own account connected, the purchase is blocked with a clear message
+- Once connected, international vendors operate identically to US vendors with direct billing
+
 ### Automatic Dokan Balance Deduction (Platform Account)
 When a vendor uses the platform shipping account (no own account connected):
 
