@@ -16,8 +16,8 @@ class LT_Admin_Settings {
     public static function add_menu() {
         add_submenu_page(
             'woocommerce',
-            'Shippo Shipping Settings',
-            'Shippo Shipping',
+            'Loothtool Shipping Settings',
+            'Loothtool Shipping',
             'manage_woocommerce',
             'lt-shippo-settings',
             [ __CLASS__, 'render_page' ]
