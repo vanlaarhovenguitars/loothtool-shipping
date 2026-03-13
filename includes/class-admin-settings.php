@@ -33,6 +33,7 @@ class LT_Admin_Settings {
             'lt_shippo_default_width',
             'lt_shippo_default_height',
             'lt_shippo_label_format',
+            'lt_shippo_label_markup_pct',
         ];
 
         foreach ( $options as $key ) {
@@ -44,6 +45,7 @@ class LT_Admin_Settings {
         $api_key     = get_option( 'lt_shippo_api_key', '' );
         $from        = get_option( 'lt_shippo_from_address', [] );
         $label_fmt   = get_option( 'lt_shippo_label_format', 'PDF' );
+        $markup_pct  = get_option( 'lt_shippo_label_markup_pct', 0 );
         ?>
         <div class="wrap">
             <h1>Shippo Shipping Settings</h1>
@@ -80,6 +82,20 @@ class LT_Admin_Settings {
                                     <option value="<?php echo $fmt; ?>" <?php selected( $label_fmt, $fmt ); ?>><?php echo $fmt; ?></option>
                                 <?php endforeach; ?>
                             </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Platform Markup on Labels</th>
+                        <td>
+                            <input type="number" step="0.1" min="0" max="100"
+                                   name="lt_shippo_label_markup_pct"
+                                   value="<?php echo esc_attr( $markup_pct ); ?>"
+                                   style="width:70px" /> %
+                            <p class="description">
+                                Added on top of the Shippo label cost when deducting from the vendor's balance.
+                                E.g. <strong>10</strong> means a $5.00 label costs the vendor $5.50 — you keep the $0.50.
+                                Set to <strong>0</strong> to pass cost through at no markup.
+                            </p>
                         </td>
                     </tr>
                 </table>

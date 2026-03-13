@@ -70,6 +70,13 @@ class LT_Vendor_Dashboard {
 
         echo '<h1 class="entry-title">Shipping Labels</h1>';
 
+        // Show the vendor their available balance so they know before buying.
+        $balance = self::get_vendor_available_balance( $vendor_id );
+        echo '<div style="background:#f1f1f1;border-left:4px solid #a42325;padding:12px 16px;margin-bottom:20px;">';
+        echo '<strong>Your available balance:</strong> $' . number_format( $balance, 2 ) . ' USD';
+        echo ' &nbsp;—&nbsp; Label costs are automatically deducted from this balance.';
+        echo '</div>';
+
         if ( ! $api_key ) {
             echo '<div class="dokan-alert dokan-alert-warning">Shipping labels are not configured yet. Please ask the site admin to add the Shippo API key.</div>';
             echo '</div></article></div></div>';
@@ -210,16 +217,63 @@ class LT_Vendor_Dashboard {
             wp_send_json_error( 'Shippo not configured.' );
         }
 
+        // ── Balance check ────────────────────────────────────────────────────
+        // Look up the rate cost from the cached Shippo quote so the vendor
+        // can't pass a manipulated amount from the browser.
+        $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
+        $rate_amount  = 0.0;
+        $rate_currency = 'USD';
+
+        if ( $cached_rates ) {
+            foreach ( $cached_rates as $rate ) {
+                if ( ( $rate['object_id'] ?? '' ) === $rate_id ) {
+                    $rate_amount   = (float) ( $rate['amount'] ?? 0 );
+                    $rate_currency = $rate['currency'] ?? 'USD';
+                    break;
+                }
+            }
+        }
+
+        // Apply platform markup (set in admin settings, default 0%).
+        $markup_pct  = (float) get_option( 'lt_shippo_label_markup_pct', 0 );
+        $charge_amount = $rate_amount * ( 1 + $markup_pct / 100 );
+
+        // Deduct from vendor's Dokan balance before purchasing the label.
+        // If deduction fails (insufficient funds), abort.
+        if ( $charge_amount > 0 ) {
+            $deducted = self::deduct_vendor_balance(
+                $vendor_id,
+                $charge_amount,
+                $rate_currency,
+                sprintf( 'Shipping label – Order #%d (%s)', $order_id, $rate_id )
+            );
+
+            if ( is_wp_error( $deducted ) ) {
+                wp_send_json_error( $deducted->get_error_message() );
+            }
+        }
+
+        // ── Purchase label from Shippo ───────────────────────────────────────
         $label_fmt = get_option( 'lt_shippo_label_format', 'PDF' );
         $shippo    = new LT_Shippo_API( $api_key );
         $txn       = $shippo->buy_label( $rate_id, $label_fmt );
 
-        if ( is_wp_error( $txn ) ) {
-            wp_send_json_error( $txn->get_error_message() );
-        }
+        // If Shippo fails, refund the balance deduction so the vendor isn't
+        // charged for a label they never received.
+        if ( is_wp_error( $txn ) || ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
+            if ( $charge_amount > 0 ) {
+                self::refund_vendor_balance(
+                    $vendor_id,
+                    $charge_amount,
+                    $rate_currency,
+                    sprintf( 'Refund – label purchase failed – Order #%d', $order_id )
+                );
+            }
 
-        if ( ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
-            $msg = $txn['messages'][0]['text'] ?? 'Label purchase failed.';
+            $msg = is_wp_error( $txn )
+                ? $txn->get_error_message()
+                : ( $txn['messages'][0]['text'] ?? 'Label purchase failed.' );
+
             wp_send_json_error( $msg );
         }
 
@@ -230,19 +284,125 @@ class LT_Vendor_Dashboard {
         $order = wc_get_order( $order_id );
         update_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, $label_url );
         update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
+        update_post_meta( $order_id, '_lt_shippo_label_cost_' . $vendor_id, $charge_amount );
+
         $order->add_order_note(
-            sprintf( 'Shipping label purchased by vendor #%d. Carrier: %s. Tracking: %s', $vendor_id, $txn['tracking_url_provider'] ?? '', $tracking_num )
+            sprintf(
+                'Shipping label purchased by vendor #%d. Cost deducted from balance: $%.2f %s. Tracking: %s',
+                $vendor_id,
+                $charge_amount,
+                $rate_currency,
+                $tracking_num
+            )
         );
 
-        // Also push tracking to WooCommerce order (if the order is awaiting shipping).
         if ( in_array( $order->get_status(), [ 'processing', 'on-hold' ], true ) ) {
             $order->update_status( 'completed', 'Label purchased and order marked complete.' );
         }
 
         wp_send_json_success( [
-            'label_url'    => $label_url,
-            'tracking_num' => $tracking_num,
+            'label_url'      => $label_url,
+            'tracking_num'   => $tracking_num,
+            'amount_charged' => number_format( $charge_amount, 2 ),
+            'currency'       => $rate_currency,
         ] );
+    }
+
+    // -------------------------------------------------------------------------
+    // Dokan balance helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Deduct an amount from a vendor's Dokan balance.
+     * Inserts a debit row into wp_dokan_vendor_balance.
+     *
+     * @return true|WP_Error
+     */
+    private static function deduct_vendor_balance( int $vendor_id, float $amount, string $currency, string $note ) {
+        $balance = self::get_vendor_available_balance( $vendor_id );
+
+        if ( $balance < $amount ) {
+            return new WP_Error(
+                'insufficient_balance',
+                sprintf(
+                    'Insufficient balance. Available: $%.2f. Label cost: $%.2f. Withdraw more earnings first.',
+                    $balance,
+                    $amount
+                )
+            );
+        }
+
+        return self::insert_balance_row( $vendor_id, $amount, 0, 'shipping_label', $note );
+    }
+
+    /**
+     * Refund a previously deducted amount back to the vendor's balance.
+     */
+    private static function refund_vendor_balance( int $vendor_id, float $amount, string $currency, string $note ): void {
+        self::insert_balance_row( $vendor_id, 0, $amount, 'shipping_label_refund', $note );
+    }
+
+    /**
+     * Insert a row into Dokan's vendor balance table.
+     *
+     * @param float $debit  Amount to subtract (use 0 for credits).
+     * @param float $credit Amount to add (use 0 for debits).
+     */
+    private static function insert_balance_row( int $vendor_id, float $debit, float $credit, string $trn_type, string $note ) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . 'dokan_vendor_balance';
+
+        // Check the table exists (requires Dokan to be active).
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+        $exists = $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" );
+        if ( ! $exists ) {
+            return new WP_Error( 'dokan_missing', 'Dokan balance table not found.' );
+        }
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+        $wpdb->insert(
+            $table,
+            [
+                'vendor_id'    => $vendor_id,
+                'trn_id'       => 0,
+                'trn_type'     => $trn_type,
+                'perticulars'  => $note,   // Dokan's column name has the typo "perticulars"
+                'debit'        => $debit,
+                'credit'       => $credit,
+                'status'       => 'approved',
+                'trn_date'     => current_time( 'mysql' ),
+                'balance_date' => current_time( 'mysql' ),
+            ],
+            [ '%d', '%d', '%s', '%s', '%f', '%f', '%s', '%s', '%s' ]
+        );
+
+        return true;
+    }
+
+    /**
+     * Get a vendor's net available balance (credits minus debits).
+     * Uses Dokan's own function if available, otherwise queries directly.
+     */
+    private static function get_vendor_available_balance( int $vendor_id ): float {
+        // Dokan Lite exposes dokan_get_seller_balance() — use it if present.
+        if ( function_exists( 'dokan_get_seller_balance' ) ) {
+            return (float) dokan_get_seller_balance( $vendor_id, false );
+        }
+
+        // Fallback: query the balance table directly.
+        global $wpdb;
+        $table = $wpdb->prefix . 'dokan_vendor_balance';
+
+        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+        $row = $wpdb->get_row(
+            $wpdb->prepare(
+                "SELECT SUM(credit) - SUM(debit) AS net FROM {$table} WHERE vendor_id = %d AND status = 'approved'",
+                $vendor_id
+            )
+        );
+
+        return $row ? (float) $row->net : 0.0;
     }
 
     // -------------------------------------------------------------------------

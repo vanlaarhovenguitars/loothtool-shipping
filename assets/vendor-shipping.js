@@ -78,6 +78,7 @@ jQuery(function ($) {
                 var html = '<div style="color:green;margin-top:12px;">'
                     + '<strong>&#10003; Label purchased!</strong><br>'
                     + 'Tracking: <strong>' + res.data.tracking_num + '</strong><br>'
+                    + '$' + res.data.amount_charged + ' ' + res.data.currency + ' deducted from your balance.<br>'
                     + '<a href="' + res.data.label_url + '" target="_blank">Download Label (PDF)</a>'
                     + '</div>';
                 $form.replaceWith(html);
