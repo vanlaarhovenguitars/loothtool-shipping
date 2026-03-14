@@ -35,3 +35,10 @@ add_action( 'plugins_loaded', function() {
         return $methods;
     } );
 }, 10 );
+
+// Remove pickup shipping methods — not used on this marketplace.
+add_filter( 'woocommerce_shipping_methods', function( $methods ) {
+    unset( $methods['local_pickup'] );
+    unset( $methods['pickup_location'] );
+    return $methods;
+}, 20 );

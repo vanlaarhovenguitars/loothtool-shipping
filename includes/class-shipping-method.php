@@ -47,7 +47,31 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
     public function calculate_shipping( $package = [] ) {
         $vendor_id = $package['vendor_id'] ?? 0;
 
-        // Get the right provider for this vendor (their own account or platform default).
+        // ── Vendor shipping mode preference ────────────────────────────────────
+        // Vendors can override live Shippo rates with flat-rate or free shipping.
+        $ship_mode = get_user_meta( $vendor_id, '_lt_ship_mode', true ) ?: 'live';
+
+        if ( $ship_mode === 'free' ) {
+            $this->add_rate( [
+                'id'    => $this->get_rate_id( 'free_shipping' ),
+                'label' => __( 'Free Shipping', 'loothtool-shipping' ),
+                'cost'  => 0,
+            ] );
+            return;
+        }
+
+        if ( $ship_mode === 'flat' ) {
+            $flat_cost = (float) get_user_meta( $vendor_id, '_lt_ship_flat_cost', true );
+            $flat_label = get_user_meta( $vendor_id, '_lt_ship_flat_label', true ) ?: __( 'Standard Shipping', 'loothtool-shipping' );
+            $this->add_rate( [
+                'id'    => $this->get_rate_id( 'flat_rate' ),
+                'label' => $flat_label,
+                'cost'  => max( 0, $flat_cost ),
+            ] );
+            return;
+        }
+
+        // Live rates mode — get the right provider for this vendor.
         $context = LT_Provider_Factory::for_vendor( $vendor_id );
         if ( is_wp_error( $context ) ) {
             return; // No provider configured — silently skip.
@@ -73,16 +97,38 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
         // Estimate parcel dimensions from package contents.
         $parcel = $this->estimate_parcel( $package['contents'] );
 
-        $rates = $context['provider']->get_rates( $from, $to, $parcel );
+        // Cache key based on stable inputs — Shippo UUIDs change every call,
+        // so we cache by vendor+destination+weight to keep rate IDs stable.
+        $cache_key = 'lt_rates_' . md5( $vendor_id . $to['zip'] . $to['country'] . round( $parcel['weight'], 2 ) );
+        $rates = get_transient( $cache_key );
+
+        if ( $rates === false ) {
+            $rates = $context['provider']->get_rates( $from, $to, $parcel );
+            if ( ! is_wp_error( $rates ) && ! empty( $rates ) ) {
+                set_transient( $cache_key, $rates, 5 * MINUTE_IN_SECONDS );
+            }
+        }
 
         if ( is_wp_error( $rates ) || empty( $rates ) ) {
             return;
         }
 
+        // Filter by vendor's allowed carriers (empty list = show all).
+        $allowed_carriers = json_decode( get_user_meta( $vendor_id, '_lt_ship_carriers', true ) ?: '[]', true );
+        if ( ! empty( $allowed_carriers ) ) {
+            $rates = array_values( array_filter( $rates, function( $r ) use ( $allowed_carriers ) {
+                return in_array( $r['provider'] ?? '', $allowed_carriers, true );
+            } ) );
+        }
+
+        if ( empty( $rates ) ) {
+            return;
+        }
+
         // Expose each returned rate as a WooCommerce shipping option.
         foreach ( $rates as $rate ) {
-            // Only offer rates that have an actual price (some are estimations).
-            if ( empty( $rate['amount'] ) || $rate['object_state'] !== 'VALID' ) {
+            // Only offer rates that have an actual price.
+            if ( empty( $rate['amount'] ) ) {
                 continue;
             }
 
@@ -92,8 +138,12 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
             $label    = $carrier . ' ' . $service . $days;
             $cost     = (float) $rate['amount'];
 
+            // Use a stable rate ID based on carrier+service so selections survive
+            // across checkout re-renders (Shippo object_id changes on every API call).
+            $stable_key = sanitize_key( $carrier . '_' . $service );
+
             $this->add_rate( [
-                'id'        => $this->get_rate_id( $rate['object_id'] ),
+                'id'        => $this->get_rate_id( $stable_key ),
                 'label'     => $label,
                 'cost'      => $cost,
                 'meta_data' => [
@@ -128,7 +178,7 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
                     'city'    => $address['city'] ?? '',
                     'state'   => $address['state'] ?? '',
                     'zip'     => $address['zip'],
-                    'country' => $address['country'] ?? 'US',
+                    'country' => $this->normalize_country( $address['country'] ?? 'US' ),
                     'email'   => $user->user_email,
                 ];
             }
@@ -136,7 +186,27 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
 
         // Fall back to global store-from address set in admin settings.
         $fallback = get_option( 'lt_shippo_from_address', [] );
+        if ( ! empty( $fallback['country'] ) ) {
+            $fallback['country'] = $this->normalize_country( $fallback['country'] );
+        }
         return empty( $fallback['zip'] ) ? null : $fallback;
+    }
+
+    /**
+     * Ensure country is a 2-letter ISO code. WooCommerce sometimes stores full names.
+     */
+    private function normalize_mass_unit( string $unit ): string {
+        $map = [ 'lbs' => 'lb', 'oz' => 'oz', 'g' => 'g', 'kg' => 'kg', 'lb' => 'lb' ];
+        return $map[ strtolower( $unit ) ] ?? 'lb';
+    }
+
+    private function normalize_country( string $country ): string {
+        if ( strlen( $country ) === 2 ) {
+            return strtoupper( $country );
+        }
+        $countries = WC()->countries->get_countries();
+        $code = array_search( $country, $countries );
+        return $code ? strtoupper( $code ) : strtoupper( $country );
     }
 
     /**
@@ -174,7 +244,7 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
             'height'        => $total_height ?: $default_height,
             'distance_unit' => get_option( 'woocommerce_dimension_unit', 'in' ),
             'weight'        => $total_weight ?: $default_weight,
-            'mass_unit'     => get_option( 'woocommerce_weight_unit', 'lb' ),
+            'mass_unit'     => $this->normalize_mass_unit( get_option( 'woocommerce_weight_unit', 'lb' ) ),
         ];
     }
 }

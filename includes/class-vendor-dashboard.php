@@ -19,8 +19,9 @@ class LT_Vendor_Dashboard {
         add_action( 'wp_enqueue_scripts',         [ __CLASS__, 'enqueue_assets' ] );
 
         // AJAX handler for buying a label.
-        add_action( 'wp_ajax_lt_buy_label',          [ __CLASS__, 'ajax_buy_label' ] );
-        add_action( 'wp_ajax_lt_save_label_format',  [ __CLASS__, 'ajax_save_label_format' ] );
+        add_action( 'wp_ajax_lt_buy_label',           [ __CLASS__, 'ajax_buy_label' ] );
+        add_action( 'wp_ajax_lt_save_label_format',   [ __CLASS__, 'ajax_save_label_format' ] );
+        add_action( 'wp_ajax_lt_save_ship_prefs',     [ __CLASS__, 'ajax_save_ship_prefs' ] );
     }
 
     // -------------------------------------------------------------------------
@@ -73,6 +74,9 @@ class LT_Vendor_Dashboard {
 
         // Render the "connect your own account" panel.
         LT_Vendor_Credentials::render_connect_panel( $vendor_id );
+
+        // Render shipping method preference panel.
+        self::render_shipping_prefs_panel( $vendor_id );
 
         // Render label format preference panel.
         self::render_label_format_panel( $vendor_id );
@@ -597,6 +601,129 @@ class LT_Vendor_Dashboard {
         $info    = dokan_get_store_info( $vendor_id );
         $country = $info['address']['country'] ?? '';
         return $country ? strtoupper( $country ) : null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Shipping method preference panel
+    // -------------------------------------------------------------------------
+
+    public static function render_shipping_prefs_panel( int $vendor_id ): void {
+        $mode         = get_user_meta( $vendor_id, '_lt_ship_mode', true )       ?: 'live';
+        $flat_cost    = get_user_meta( $vendor_id, '_lt_ship_flat_cost', true )  ?: '';
+        $flat_label   = get_user_meta( $vendor_id, '_lt_ship_flat_label', true ) ?: '';
+        $carriers_raw = get_user_meta( $vendor_id, '_lt_ship_carriers', true )   ?: '[]';
+        $carriers     = json_decode( $carriers_raw, true ) ?: [];
+        $known_carriers = [ 'USPS', 'UPS', 'FedEx', 'DHL Express', 'Canada Post', 'Australia Post' ];
+        ?>
+        <div class="lt-ship-prefs-panel" style="border:1px solid #e6e6e6;padding:20px;margin-bottom:28px;border-radius:4px;">
+            <h3 style="margin-top:0;">Shipping Method</h3>
+            <p style="margin-bottom:14px;">Choose how shipping costs are calculated for your products at checkout.</p>
+            <?php wp_nonce_field( 'lt_ship_prefs', 'lt_prefs_nonce' ); ?>
+
+            <label style="display:block;margin-bottom:10px;">
+                <input type="radio" name="lt_ship_mode" value="live" <?php checked( $mode, 'live' ); ?>>
+                <strong>Live Rates</strong> — real-time rates from your shipping carrier(s)
+            </label>
+            <div id="lt-carrier-options" style="margin-left:24px;margin-bottom:12px;<?php echo $mode !== 'live' ? 'display:none;' : ''; ?>">
+                <p style="margin:4px 0 8px;color:#555;font-size:0.9em;">Show only these carriers (leave all unchecked to show all):</p>
+                <?php foreach ( $known_carriers as $c ) : ?>
+                    <label style="display:inline-block;margin-right:16px;margin-bottom:6px;">
+                        <input type="checkbox" name="lt_ship_carriers[]" value="<?php echo esc_attr( $c ); ?>"
+                               <?php checked( in_array( $c, $carriers, true ) ); ?>>
+                        <?php echo esc_html( $c ); ?>
+                    </label>
+                <?php endforeach; ?>
+            </div>
+
+            <label style="display:block;margin-bottom:10px;">
+                <input type="radio" name="lt_ship_mode" value="flat" <?php checked( $mode, 'flat' ); ?>>
+                <strong>Flat Rate</strong> — charge a fixed fee per shipment
+            </label>
+            <div id="lt-flat-options" style="margin-left:24px;margin-bottom:12px;<?php echo $mode !== 'flat' ? 'display:none;' : ''; ?>">
+                <label style="display:block;margin-bottom:6px;">
+                    Label shown to customer:
+                    <input type="text" name="lt_ship_flat_label" value="<?php echo esc_attr( $flat_label ); ?>"
+                           placeholder="e.g. Standard Shipping" class="dokan-form-control" style="max-width:260px;">
+                </label>
+                <label style="display:block;">
+                    Cost (USD):
+                    <input type="number" name="lt_ship_flat_cost" value="<?php echo esc_attr( $flat_cost ); ?>"
+                           min="0" step="0.01" placeholder="e.g. 6.99" class="dokan-form-control" style="max-width:120px;">
+                </label>
+            </div>
+
+            <label style="display:block;margin-bottom:14px;">
+                <input type="radio" name="lt_ship_mode" value="free" <?php checked( $mode, 'free' ); ?>>
+                <strong>Free Shipping</strong> — no shipping charge (include cost in your product prices)
+            </label>
+
+            <button type="button" class="dokan-btn dokan-btn-sm dokan-btn-theme" id="lt-save-ship-prefs">Save</button>
+            <span id="lt-prefs-msg" style="margin-left:10px;font-style:italic;color:#555;"></span>
+
+            <script>
+            (function(){
+                var modes = document.querySelectorAll('input[name="lt_ship_mode"]');
+                function toggleSections() {
+                    var v = document.querySelector('input[name="lt_ship_mode"]:checked').value;
+                    document.getElementById('lt-carrier-options').style.display = v==='live' ? 'block' : 'none';
+                    document.getElementById('lt-flat-options').style.display    = v==='flat' ? 'block' : 'none';
+                }
+                modes.forEach(function(r){ r.addEventListener('change', toggleSections); });
+
+                document.getElementById('lt-save-ship-prefs').addEventListener('click', function(){
+                    var mode      = document.querySelector('input[name="lt_ship_mode"]:checked').value;
+                    var carriers  = Array.from(document.querySelectorAll('input[name="lt_ship_carriers[]"]:checked')).map(function(c){return c.value;});
+                    var flatCost  = document.querySelector('input[name="lt_ship_flat_cost"]').value;
+                    var flatLabel = document.querySelector('input[name="lt_ship_flat_label"]').value;
+                    var nonce     = document.querySelector('input[name="lt_prefs_nonce"]').value;
+                    var msg       = document.getElementById('lt-prefs-msg');
+                    msg.textContent = 'Saving...';
+                    fetch(ltShipping.ajaxUrl, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                        body: new URLSearchParams({
+                            action: 'lt_save_ship_prefs',
+                            lt_prefs_nonce: nonce,
+                            lt_ship_mode: mode,
+                            lt_ship_flat_cost: flatCost,
+                            lt_ship_flat_label: flatLabel,
+                            lt_ship_carriers: JSON.stringify(carriers)
+                        })
+                    }).then(function(r){return r.json();}).then(function(d){
+                        msg.textContent = d.success ? 'Saved!' : ('Error: ' + (d.data || 'unknown'));
+                    });
+                });
+            })();
+            </script>
+        </div>
+        <?php
+    }
+
+    public static function ajax_save_ship_prefs(): void {
+        check_ajax_referer( 'lt_ship_prefs', 'lt_prefs_nonce' );
+        $vendor_id = (int) dokan_get_current_user_id();
+        if ( ! $vendor_id ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        $mode = sanitize_key( $_POST['lt_ship_mode'] ?? 'live' );
+        if ( ! in_array( $mode, [ 'live', 'flat', 'free' ], true ) ) {
+            $mode = 'live';
+        }
+        update_user_meta( $vendor_id, '_lt_ship_mode', $mode );
+        update_user_meta( $vendor_id, '_lt_ship_flat_cost',  (float) ( $_POST['lt_ship_flat_cost'] ?? 0 ) );
+        update_user_meta( $vendor_id, '_lt_ship_flat_label', sanitize_text_field( $_POST['lt_ship_flat_label'] ?? '' ) );
+
+        $carriers_raw = sanitize_text_field( $_POST['lt_ship_carriers'] ?? '[]' );
+        $carriers     = json_decode( $carriers_raw, true );
+        $carriers     = is_array( $carriers ) ? array_map( 'sanitize_text_field', $carriers ) : [];
+        update_user_meta( $vendor_id, '_lt_ship_carriers', wp_json_encode( $carriers ) );
+
+        // Bust rate cache so changes take effect immediately at checkout.
+        global $wpdb;
+        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_lt_rates_%' OR option_name LIKE '_transient_timeout_lt_rates_%'" );
+
+        wp_send_json_success();
     }
 }
 
