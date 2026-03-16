@@ -17,8 +17,8 @@ class LT_Product_Video {
     public static function init() {
         // ── Dokan vendor product editor ──────────────────────────────────────
         add_action( 'dokan_product_edit_after_main',    [ __CLASS__, 'render_vendor_field' ], 10, 2 );
-        add_action( 'dokan_process_product_meta',       [ __CLASS__, 'save_vendor_field' ],   10, 2 );
-        add_action( 'dokan_new_product_added',          [ __CLASS__, 'save_vendor_field' ],   10, 2 );
+        add_action( 'dokan_process_product_meta',       [ __CLASS__, 'save_vendor_field' ],   10, 1 );
+        add_action( 'dokan_new_product_added',          [ __CLASS__, 'save_vendor_field' ],   10, 1 );
 
         // ── WC admin product editor ───────────────────────────────────────────
         add_action( 'woocommerce_product_options_general_product_data', [ __CLASS__, 'render_admin_field' ] );
@@ -49,10 +49,9 @@ class LT_Product_Video {
         <?php
     }
 
-    public static function save_vendor_field( $post_id, $data ) {
-        // $data is the $_POST array passed by Dokan.
-        $url = isset( $data['lt_product_video_url'] )
-            ? esc_url_raw( wp_unslash( $data['lt_product_video_url'] ) )
+    public static function save_vendor_field( $post_id ) {
+        $url = isset( $_POST['lt_product_video_url'] )
+            ? esc_url_raw( wp_unslash( $_POST['lt_product_video_url'] ) )
             : '';
 
         // Only accept YouTube / youtu.be URLs; clear the meta if invalid.
