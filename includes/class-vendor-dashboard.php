@@ -756,7 +756,11 @@ class LT_Vendor_Dashboard {
 
         // Bust rate cache so changes take effect immediately at checkout.
         global $wpdb;
-        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_lt_rates_%' OR option_name LIKE '_transient_timeout_lt_rates_%'" );
+        $wpdb->query( $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
+            '_transient_lt_rates_%',
+            '_transient_timeout_lt_rates_%'
+        ) );
 
         wp_send_json_success();
     }
@@ -767,15 +771,15 @@ class LT_Vendor_Dashboard {
 
     public static function ajax_mark_shipped(): void {
         $order_id  = absint( $_POST['order_id'] ?? 0 );
+
+        // Verify nonce immediately using the order_id (only absint applied — safe to use here).
+        check_ajax_referer( 'lt_mark_shipped_' . $order_id, 'nonce' );
+
         $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
 
         if ( ! $order_id || ! $vendor_id ) {
             wp_send_json_error( 'Missing parameters.' );
         }
-
-        // Nonce check first — order_id is required to build the nonce action but
-        // only absint() has been applied so no harm in reading it before verification.
-        check_ajax_referer( 'lt_mark_shipped_' . $order_id, 'nonce' );
 
         if ( (int) dokan_get_current_user_id() !== $vendor_id ) {
             wp_send_json_error( 'Unauthorized.' );
@@ -827,8 +831,6 @@ class LT_Vendor_Dashboard {
                 $carrier = $item->get_meta( 'carrier' ) ?: $item->get_method_title() ?: 'Other';
                 break;
             }
-            $carrier = $item->get_method_title() ?: 'Other';
-            break;
         }
 
         update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking );
