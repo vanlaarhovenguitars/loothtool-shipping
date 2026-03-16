@@ -63,6 +63,18 @@ class LT_Shippo_API {
     }
 
     /**
+     * Verify the API key is valid by hitting a lightweight endpoint.
+     * Returns true on success, WP_Error on failure.
+     */
+    public function ping(): bool|WP_Error {
+        $result = $this->get( 'carrier_accounts/?results=1' );
+        if ( is_wp_error( $result ) ) {
+            return $result;
+        }
+        return true;
+    }
+
+    /**
      * Validate / create an address (optional call before rating).
      *
      * @param array $address

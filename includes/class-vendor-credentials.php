@@ -60,6 +60,24 @@ class LT_Vendor_Credentials {
     }
 
     /**
+     * Test raw (unsaved) credentials without writing them to the DB first.
+     * Used so we can validate before saving, eliminating the race window.
+     *
+     * @return true|WP_Error
+     */
+    public static function validate_raw( string $type, string $key, string $secret = '' ): bool|WP_Error {
+        if ( $type === 'shippo' ) {
+            $api = new LT_Shippo_API( $key );
+            return $api->ping();
+        }
+        if ( $type === 'shipstation' ) {
+            $api = new LT_ShipStation_API( $key, $secret );
+            return $api->validate_credentials() ? true : new WP_Error( 'ss_invalid', 'ShipStation credentials are invalid.' );
+        }
+        return new WP_Error( 'unknown_type', 'Unknown provider type.' );
+    }
+
+    /**
      * Test whether stored credentials actually work.
      *
      * @return true|WP_Error
@@ -71,13 +89,8 @@ class LT_Vendor_Credentials {
         }
 
         if ( $creds['type'] === 'shippo' ) {
-            $api   = new LT_Shippo_API( $creds['key'] );
-            $rates = $api->get_rates(
-                [ 'name' => 'Test', 'street1' => '215 Clayton St', 'city' => 'San Francisco', 'state' => 'CA', 'zip' => '94117', 'country' => 'US' ],
-                [ 'name' => 'Test', 'street1' => '215 Clayton St', 'city' => 'San Francisco', 'state' => 'CA', 'zip' => '94117', 'country' => 'US' ],
-                [ 'length' => 5, 'width' => 5, 'height' => 5, 'distance_unit' => 'in', 'weight' => 2, 'mass_unit' => 'lb' ]
-            );
-            return is_wp_error( $rates ) ? $rates : true;
+            $api = new LT_Shippo_API( $creds['key'] );
+            return $api->ping();
         }
 
         if ( $creds['type'] === 'shipstation' ) {
@@ -185,15 +198,14 @@ class LT_Vendor_Credentials {
             wp_send_json_error( 'API key is required.' );
         }
 
-        self::save( $vendor_id, $type, $key, $secret );
-
-        // Validate the saved credentials immediately.
-        $valid = self::validate( $vendor_id );
-
+        // Validate credentials BEFORE saving — avoids a race window where another
+        // request could read invalid credentials between save() and validate().
+        $valid = self::validate_raw( $type, $key, $secret );
         if ( is_wp_error( $valid ) ) {
-            self::delete( $vendor_id ); // Don't keep invalid creds.
-            wp_send_json_error( 'Credentials saved but validation failed: ' . $valid->get_error_message() );
+            wp_send_json_error( 'Credentials invalid: ' . $valid->get_error_message() );
         }
+
+        self::save( $vendor_id, $type, $key, $secret );
 
         wp_send_json_success( [ 'type' => strtoupper( $type ) ] );
     }
@@ -216,7 +228,7 @@ class LT_Vendor_Credentials {
 
     private static function encrypt( string $plaintext ): string {
         $key = substr( hash( 'sha256', wp_salt( 'auth' ), true ), 0, 32 );
-        $iv  = openssl_random_pseudo_bytes( 16 );
+        $iv  = random_bytes( 16 ); // cryptographically secure; replaces deprecated openssl_random_pseudo_bytes
         $enc = openssl_encrypt( $plaintext, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv );
         return base64_encode( $iv . $enc );
     }

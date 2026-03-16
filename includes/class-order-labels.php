@@ -1,6 +1,6 @@
 <?php
 /**
- * Handles fetching Shippo rates for vendor orders (AJAX, called from the vendor dashboard)
+ * Fetches Shippo rates for vendor orders using the vendor's own connected account,
  * and shows per-vendor tracking info on the customer's order detail page.
  */
 
@@ -20,7 +20,7 @@ class LT_Order_Labels {
     }
 
     // -------------------------------------------------------------------------
-    // AJAX: fetch rates for a vendor's order
+    // AJAX: fetch rates using vendor's own Shippo account
     // -------------------------------------------------------------------------
 
     public static function ajax_fetch_order_rates() {
@@ -37,9 +37,27 @@ class LT_Order_Labels {
             wp_send_json_error( 'Unauthorized.' );
         }
 
-        $api_key = get_option( 'lt_shippo_api_key', '' );
-        if ( ! $api_key ) {
-            wp_send_json_error( 'Shippo not configured.' );
+        // Verify vendor owns items in this order (prevents IDOR).
+        $order_check = wc_get_order( $order_id );
+        if ( ! $order_check ) {
+            wp_send_json_error( 'Order not found.' );
+        }
+        $vendor_has_items = false;
+        foreach ( $order_check->get_items() as $item ) {
+            $pid = $item->get_product_id();
+            if ( $pid && (int) get_post_field( 'post_author', $pid ) === $vendor_id ) {
+                $vendor_has_items = true;
+                break;
+            }
+        }
+        if ( ! $vendor_has_items ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        // Use the vendor's own connected Shippo account.
+        $creds = LT_Vendor_Credentials::get( $vendor_id );
+        if ( ! $creds || $creds['type'] !== 'shippo' ) {
+            wp_send_json_error( 'No Shippo account connected. Connect your account in the Shipping Account panel above.' );
         }
 
         $order = wc_get_order( $order_id );
@@ -47,7 +65,6 @@ class LT_Order_Labels {
             wp_send_json_error( 'Order not found.' );
         }
 
-        // Build to-address from order.
         $to = [
             'name'    => $order->get_shipping_first_name() . ' ' . $order->get_shipping_last_name(),
             'street1' => $order->get_shipping_address_1(),
@@ -58,26 +75,44 @@ class LT_Order_Labels {
             'country' => $order->get_shipping_country(),
         ];
 
-        // Build from-address from vendor profile.
         $from = self::get_vendor_address( $vendor_id );
         if ( ! $from ) {
             wp_send_json_error( 'Vendor has no ship-from address. Set it in your store settings.' );
         }
 
-        // Estimate parcel from the items belonging to this vendor.
         $parcel = self::estimate_parcel_for_vendor_order( $order, $vendor_id );
 
-        $shippo = new LT_Shippo_API( $api_key );
+        $shippo = new LT_Shippo_API( $creds['key'] );
         $rates  = $shippo->get_rates( $from, $to, $parcel );
 
         if ( is_wp_error( $rates ) ) {
-            wp_send_json_error( $rates->get_error_message() );
+            // Log full Shippo error server-side; return only a generic message to the client
+            // to prevent leaking internal API details, field names, or account structure.
+            error_log( '[LT Shipping] Shippo get_rates error for order ' . $order_id . ': ' . $rates->get_error_message() . ' | data: ' . wp_json_encode( $rates->get_error_data() ) );
+            wp_send_json_error( 'Unable to fetch shipping rates. Please check your store address and try again.' );
         }
 
-        // Cache for 30 minutes so the vendor doesn't hammer the API.
+        // Filter to only the carrier/service the customer chose at checkout.
+        $chosen_carrier = null;
+        $chosen_service = null;
+        foreach ( $order->get_items( 'shipping' ) as $item ) {
+            if ( $item->get_method_id() === 'lt_shippo' && (int) $item->get_meta( 'vendor_id' ) === $vendor_id ) {
+                $chosen_carrier = $item->get_meta( 'carrier' );
+                $chosen_service = $item->get_meta( 'service' );
+                break;
+            }
+        }
+        if ( $chosen_carrier && $chosen_service ) {
+            $target = sanitize_key( $chosen_carrier . '_' . $chosen_service );
+            $rates  = array_values( array_filter( $rates, function ( $rate ) use ( $target ) {
+                $key = sanitize_key( ( $rate['provider'] ?? '' ) . '_' . ( $rate['servicelevel']['name'] ?? '' ) );
+                return $key === $target;
+            } ) );
+        }
+
+        // Cache for 30 minutes.
         set_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id, $rates, 30 * MINUTE_IN_SECONDS );
 
-        // Build HTML to inject into the page.
         ob_start();
         LT_Vendor_Dashboard::render_rate_selector_public( $order_id, $vendor_id, $rates );
         $html = ob_get_clean();
@@ -93,18 +128,17 @@ class LT_Order_Labels {
         $order_id = $order->get_id();
         $vendors  = [];
 
-        // Find all vendor tracking numbers on this order.
         foreach ( $order->get_items() as $item ) {
             $product_id = $item->get_product_id();
             $vendor_id  = (int) get_post_field( 'post_author', $product_id );
             if ( $vendor_id && ! isset( $vendors[ $vendor_id ] ) ) {
                 $tracking = get_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, true );
                 if ( $tracking ) {
-                    $store         = dokan_get_store_info( $vendor_id );
-                    $store_name    = $store['store_name'] ?? 'Vendor';
+                    $store      = dokan_get_store_info( $vendor_id );
+                    $store_name = $store['store_name'] ?? 'Vendor';
                     $vendors[ $vendor_id ] = [
-                        'name'    => $store_name,
-                        'tracking'=> $tracking,
+                        'name'     => $store_name,
+                        'tracking' => $tracking,
                     ];
                 }
             }
@@ -157,7 +191,7 @@ class LT_Order_Labels {
                 echo '<p><strong>' . esc_html( $store['store_name'] ?? 'Vendor ' . $vendor_id ) . '</strong><br>';
                 echo 'Tracking: ' . esc_html( $tracking ) . '<br>';
                 echo '<a href="' . esc_url( $label_url ) . '" target="_blank">Download Label</a></p>';
-                break; // dedupe per vendor
+                break;
             }
         }
 
@@ -186,6 +220,7 @@ class LT_Order_Labels {
                     'zip'     => $address['zip'],
                     'country' => $address['country'] ?? 'US',
                     'email'   => $user->user_email,
+                    'phone'   => $info['phone'] ?? get_user_meta( $user->ID, 'billing_phone', true ) ?? '',
                 ];
             }
         }
@@ -225,8 +260,13 @@ class LT_Order_Labels {
             'height'        => $total_height ?: $default_height,
             'distance_unit' => get_option( 'woocommerce_dimension_unit', 'in' ),
             'weight'        => $total_weight ?: $default_weight,
-            'mass_unit'     => get_option( 'woocommerce_weight_unit', 'lb' ),
+            'mass_unit'     => self::normalize_weight_unit( get_option( 'woocommerce_weight_unit', 'lb' ) ),
         ];
+    }
+
+    private static function normalize_weight_unit( string $wc_unit ): string {
+        $map = [ 'lbs' => 'lb', 'kgs' => 'kg' ];
+        return $map[ $wc_unit ] ?? $wc_unit;
     }
 }
 
