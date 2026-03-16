@@ -1,7 +1,8 @@
 <?php
 /**
  * Dokan vendor dashboard — "Shipping Labels" tab.
- * Vendors see their pending orders and can buy a Shippo label per order.
+ * Shows vendors their pending orders with the shipping method the customer chose,
+ * so they can purchase the label through their own Shippo account.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -14,14 +15,24 @@ class LT_Vendor_Dashboard {
             return;
         }
 
+        add_filter( 'dokan_query_var_filter',     [ __CLASS__, 'register_query_var' ] );
         add_filter( 'dokan_get_dashboard_nav',    [ __CLASS__, 'add_nav_item' ] );
         add_action( 'dokan_load_custom_template', [ __CLASS__, 'load_template' ] );
         add_action( 'wp_enqueue_scripts',         [ __CLASS__, 'enqueue_assets' ] );
 
-        // AJAX handler for buying a label.
-        add_action( 'wp_ajax_lt_buy_label',           [ __CLASS__, 'ajax_buy_label' ] );
-        add_action( 'wp_ajax_lt_save_label_format',   [ __CLASS__, 'ajax_save_label_format' ] );
-        add_action( 'wp_ajax_lt_save_ship_prefs',     [ __CLASS__, 'ajax_save_ship_prefs' ] );
+        add_action( 'wp_ajax_lt_buy_label',       [ __CLASS__, 'ajax_buy_label' ] );
+        add_action( 'wp_ajax_lt_save_ship_prefs', [ __CLASS__, 'ajax_save_ship_prefs' ] );
+        add_action( 'wp_ajax_lt_mark_shipped',    [ __CLASS__, 'ajax_mark_shipped' ] );
+        add_action( 'wp_ajax_lt_save_tracking',   [ __CLASS__, 'ajax_save_tracking' ] );
+    }
+
+    // -------------------------------------------------------------------------
+    // Query var registration (required so WP doesn't 404 the endpoint)
+    // -------------------------------------------------------------------------
+
+    public static function register_query_var( array $vars ): array {
+        $vars[] = 'shipping-labels';
+        return $vars;
     }
 
     // -------------------------------------------------------------------------
@@ -45,7 +56,6 @@ class LT_Vendor_Dashboard {
     public static function load_template( array $query_vars ) {
         if ( isset( $query_vars['shipping-labels'] ) ) {
             self::render_labels_page();
-            // Tell Dokan the template has been handled.
             define( 'DOKAN_TEMPLATE_HANDLED', true );
         }
     }
@@ -56,15 +66,11 @@ class LT_Vendor_Dashboard {
 
     private static function render_labels_page() {
         $vendor_id = dokan_get_current_user_id();
-        $api_key   = get_option( 'lt_shippo_api_key', '' );
 
         echo '<div class="dokan-dashboard-wrap">';
-        echo '<div class="dokan-dash-sidebar">';
-        // Dokan sidebar
         if ( function_exists( 'dokan_get_template_part' ) ) {
-            dokan_get_template_part( 'dashboard/dashboard-nav' );
+            dokan_get_template_part( 'global/dashboard-nav', '', [ 'active_menu' => 'shipping-labels' ] );
         }
-        echo '</div>'; // sidebar
 
         echo '<div class="dokan-dashboard-content">';
         echo '<article class="dokan-dashboard-content-area">';
@@ -72,102 +78,202 @@ class LT_Vendor_Dashboard {
 
         echo '<h1 class="entry-title">Shipping Labels</h1>';
 
-        // Render the "connect your own account" panel.
+        // Connect panel — vendors must link their own Shippo account.
         LT_Vendor_Credentials::render_connect_panel( $vendor_id );
 
         // Render shipping method preference panel.
         self::render_shipping_prefs_panel( $vendor_id );
 
-        // Render label format preference panel.
-        self::render_label_format_panel( $vendor_id );
-
-        // If vendor has their own account connected, no balance check needed.
-        $has_own_account   = (bool) LT_Vendor_Credentials::get( $vendor_id );
-        $vendor_country    = self::get_vendor_store_country( $vendor_id );
-        $is_international  = ( $vendor_country && $vendor_country !== 'US' );
-
-        // International vendors without their own account: show a hard requirement notice.
-        if ( $is_international && ! $has_own_account ) {
-            echo '<div class="dokan-alert dokan-alert-warning" style="border-left:4px solid #e67e22;background:#fef9f0;padding:14px 18px;margin-bottom:20px;">';
-            echo '<strong>Connect your own shipping account to purchase labels.</strong><br>';
-            echo 'Vendors outside the US must use their own Shippo or ShipStation account. ';
-            echo 'Rate estimates are still shown at checkout, but label purchases must go through your own account. ';
-            echo 'Use the panel above to connect your account.';
+        // Gate: require a connected Shippo account before showing orders.
+        $has_own_account = (bool) LT_Vendor_Credentials::get( $vendor_id );
+        if ( ! $has_own_account ) {
+            echo '<div style="border-left:4px solid #2980b9;background:#eaf4fb;padding:14px 18px;margin-bottom:20px;border-radius:0 4px 4px 0;">';
+            echo '<strong>Connect your Shippo account above</strong> to view your pending orders and enter tracking numbers.';
             echo '</div>';
-        }
-
-        if ( ! $has_own_account && ! $is_international ) {
-            // Show the vendor their available balance so they know before buying.
-            $balance = self::get_vendor_available_balance( $vendor_id );
-            echo '<div style="background:#f1f1f1;border-left:4px solid #a42325;padding:12px 16px;margin-bottom:20px;">';
-            echo '<strong>Your available balance:</strong> $' . number_format( $balance, 2 ) . ' USD';
-            echo ' &nbsp;—&nbsp; Label costs are automatically deducted from this balance when using the platform account.';
-            echo '</div>';
-        }
-
-        // Check a platform provider exists (only matters if vendor has no own account).
-        $platform_ok = ! is_wp_error( LT_Provider_Factory::platform() );
-        if ( ! $has_own_account && ! $platform_ok ) {
-            echo '<div class="dokan-alert dokan-alert-warning">Shipping is not configured yet. Connect your own account above or ask the site admin to set up the platform shipping account.</div>';
             echo '</div></article></div></div>';
             return;
         }
 
-        // Get this vendor's recent orders that need shipping.
-        $orders = self::get_vendor_orders_needing_label( $vendor_id );
+        $orders = self::get_vendor_orders( $vendor_id );
 
         if ( empty( $orders ) ) {
-            echo '<p>No orders awaiting a shipping label.</p>';
+            echo '<p>No processing orders found.</p>';
             echo '</div></article></div></div>';
             return;
         }
 
-        echo '<p>Select a rate to purchase a label for each order. Labels are generated instantly via Shippo and tracking numbers are saved to the order.</p>';
-
+        // Split into unshipped (needs action) and shipped (already handled).
+        $pending  = [];
+        $shipped  = [];
         foreach ( $orders as $order ) {
-            self::render_order_label_card( $order, $vendor_id );
+            $oid = $order->get_id();
+            $has_lt_meta = (
+                get_post_meta( $oid, '_lt_shippo_label_url_' . $vendor_id, true ) ||
+                get_post_meta( $oid, '_lt_shippo_tracking_' . $vendor_id, true ) ||
+                get_post_meta( $oid, '_lt_manually_shipped_' . $vendor_id, true )
+            );
+            $has_dokan_tracking = ! empty( self::get_dokan_tracking_items( $oid, $vendor_id ) );
+            if ( $has_lt_meta || $has_dokan_tracking ) {
+                $shipped[] = $order;
+            } else {
+                $pending[] = $order;
+            }
+        }
+
+        echo '<p style="margin-bottom:16px;">Use the carrier and service shown below to purchase a label through your <a href="https://goshippo.com" target="_blank">Shippo account</a>, then enter the tracking number here.</p>';
+
+        if ( ! empty( $pending ) ) {
+            echo '<h3 style="margin-bottom:10px;">Needs Shipping (' . count( $pending ) . ')</h3>';
+            foreach ( $pending as $order ) {
+                self::render_order_label_card( $order, $vendor_id, false );
+            }
+        }
+
+        if ( ! empty( $shipped ) ) {
+            echo '<h3 style="margin-top:24px;margin-bottom:10px;">Shipped (' . count( $shipped ) . ')</h3>';
+            foreach ( $shipped as $order ) {
+                self::render_order_label_card( $order, $vendor_id, true );
+            }
         }
 
         echo '</div></article></div></div>';
     }
 
-    private static function render_order_label_card( WC_Order $order, int $vendor_id ) {
+    // -------------------------------------------------------------------------
+    // Order card
+    // -------------------------------------------------------------------------
+
+    private static function render_order_label_card( WC_Order $order, int $vendor_id, bool $is_shipped ) {
         $order_id       = $order->get_id();
         $existing_label = get_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, true );
         $tracking_num   = get_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, true );
+        $manually_ship  = get_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, true );
 
-        echo '<div class="lt-label-card" style="border:1px solid #e6e6e6;padding:20px;margin-bottom:20px;border-radius:4px;">';
-        echo '<h3>Order #' . esc_html( $order->get_order_number() ) . ' &mdash; ' . esc_html( $order->get_formatted_billing_full_name() ) . '</h3>';
+        // Pull Dokan shipment tracking items as fallback.
+        $dokan_tracking = self::get_dokan_tracking_items( $order_id, $vendor_id );
 
-        // Ship-to
+        // Compact shipped card.
+        if ( $is_shipped ) {
+            echo '<div class="lt-label-card" style="border:1px solid #d4edda;background:#f8fff9;padding:10px 14px;margin-bottom:8px;border-radius:4px;display:flex;flex-wrap:wrap;align-items:center;gap:12px;">';
+            echo '<span style="font-weight:600;min-width:80px;">Order #' . esc_html( $order->get_order_number() ) . '</span>';
+            echo '<span style="color:#555;">' . esc_html( $order->get_formatted_billing_full_name() ) . '</span>';
+            echo '<span style="color:green;font-weight:600;">&#10003; Shipped</span>';
+            if ( $tracking_num ) {
+                echo '<span style="color:#555;">Tracking: <strong>' . esc_html( $tracking_num ) . '</strong></span>';
+            } elseif ( ! empty( $dokan_tracking ) ) {
+                foreach ( $dokan_tracking as $item ) {
+                    $provider = ! empty( $item->provider_label ) ? esc_html( $item->provider_label ) . ': ' : '';
+                    $tnum     = ! empty( $item->number ) ? esc_html( $item->number ) : '';
+                    if ( $tnum ) {
+                        echo '<span style="color:#555;">' . $provider . '<strong>' . $tnum . '</strong></span>';
+                    }
+                }
+            } elseif ( $manually_ship ) {
+                echo '<span style="color:#888;font-style:italic;">No tracking recorded</span>';
+            }
+            if ( $existing_label ) {
+                echo '<a href="' . esc_url( $existing_label ) . '" target="_blank"
+                        class="dokan-btn dokan-btn-sm dokan-btn-theme"
+                        style="display:inline-block;padding:4px 10px;font-size:12px;">
+                        &#128438; Download Label
+                     </a>';
+            }
+            echo '</div>';
+            return;
+        }
+
+        // Full card for unshipped orders.
+        // Build a compact ship-to line.
         $to_parts = array_filter( [
             $order->get_shipping_address_1(),
             $order->get_shipping_city(),
             $order->get_shipping_state(),
             $order->get_shipping_postcode(),
-            $order->get_shipping_country(),
         ] );
-        echo '<p><strong>Ship to:</strong> ' . esc_html( implode( ', ', $to_parts ) ) . '</p>';
 
-        if ( $existing_label && $tracking_num ) {
-            echo '<p style="color:green;">&#10003; Label purchased. Tracking: <strong>' . esc_html( $tracking_num ) . '</strong></p>';
-            echo '<p><a href="' . esc_url( $existing_label ) . '" target="_blank" class="dokan-btn dokan-btn-sm dokan-btn-theme">Download Label (PDF)</a></p>';
+        // Chosen carrier line.
+        $chosen_label = '';
+        $chosen = self::get_chosen_shipping_for_vendor( $order, $vendor_id );
+        if ( $chosen ) {
+            $chosen_label = esc_html( $chosen['carrier'] );
+            if ( $chosen['service'] ) {
+                $chosen_label .= ' — ' . esc_html( $chosen['service'] );
+            }
+            if ( $chosen['days'] ) {
+                $days          = (int) $chosen['days'];
+                $chosen_label .= ' (est. ' . $days . 'd)';
+            }
         } else {
-            // Show cached rates or fetch button.
-            $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
-            if ( $cached_rates ) {
-                self::render_rate_selector( $order_id, $vendor_id, $cached_rates );
-            } else {
-                echo '<button class="dokan-btn dokan-btn-sm dokan-btn-default lt-fetch-rates-btn"
-                             data-order="' . esc_attr( $order_id ) . '"
-                             data-vendor="' . esc_attr( $vendor_id ) . '">
-                             Get Shipping Rates
-                     </button>';
-                echo '<div class="lt-rates-output" id="lt-rates-' . esc_attr( $order_id ) . '"></div>';
+            foreach ( $order->get_items( 'shipping' ) as $item ) {
+                $chosen_label = esc_html( $item->get_method_title() );
+                break;
             }
         }
 
+        echo '<div class="lt-label-card" style="border:1px solid #e6e6e6;padding:14px 16px;margin-bottom:12px;border-radius:4px;">';
+
+        // Compact header row.
+        echo '<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;margin-bottom:8px;">';
+        echo '<strong style="font-size:1em;">Order #' . esc_html( $order->get_order_number() ) . '</strong>';
+        echo '<span>' . esc_html( $order->get_formatted_billing_full_name() ) . '</span>';
+        if ( $to_parts ) {
+            echo '<span style="color:#777;font-size:0.88em;">&#9993; ' . esc_html( implode( ', ', $to_parts ) ) . '</span>';
+        }
+        if ( $chosen_label ) {
+            echo '<span style="color:#555;font-size:0.88em;"><strong>Carrier:</strong> ' . $chosen_label . '</span>';
+        }
         echo '</div>';
+
+        echo '<div style="border-top:1px solid #f0f0f0;padding-top:10px;">';
+
+        // Rate selector or fetch button.
+        $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
+        if ( $cached_rates ) {
+            self::render_rate_selector( $order_id, $vendor_id, $cached_rates );
+        } else {
+            echo '<button class="dokan-btn dokan-btn-sm dokan-btn-theme lt-fetch-rates-btn"
+                         data-order="' . esc_attr( $order_id ) . '"
+                         data-vendor="' . esc_attr( $vendor_id ) . '">
+                         Get Shipping Rates
+                 </button>';
+            echo '<div class="lt-rates-output" id="lt-rates-' . esc_attr( $order_id ) . '"></div>';
+        }
+
+        // Manual tracking entry.
+        echo '<div style="margin-top:10px;">';
+        echo '<p style="margin:0 0 4px;color:#666;font-size:0.85em;">Already have a label? Enter tracking:</p>';
+        echo '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">';
+        echo '<input type="text" class="lt-tracking-input dokan-form-control"
+                     placeholder="e.g. 9400111899223397221318"
+                     style="max-width:240px;flex:1;height:32px;font-size:13px;">';
+        echo '<button class="dokan-btn dokan-btn-sm dokan-btn-default lt-save-tracking-btn"
+                     data-order="' . esc_attr( $order_id ) . '"
+                     data-vendor="' . esc_attr( $vendor_id ) . '"
+                     data-nonce="' . esc_attr( wp_create_nonce( 'lt_save_tracking_' . $order_id ) ) . '"
+                     style="height:32px;">
+                     Save
+             </button>';
+        echo '<span class="lt-tracking-msg" style="font-style:italic;font-size:0.85em;"></span>';
+        echo '</div>';
+        echo '<label style="display:inline-flex;align-items:center;gap:5px;margin-top:6px;font-size:0.85em;color:#555;cursor:pointer;">';
+        echo '<input type="checkbox" class="lt-notify-checkbox" checked> Notify customer by email';
+        echo '</label>';
+        echo '</div>';
+
+        // Dismiss without tracking.
+        echo '<div style="margin-top:8px;">';
+        echo '<button class="dokan-btn dokan-btn-sm dokan-btn-default lt-mark-shipped-btn"
+                     data-order="' . esc_attr( $order_id ) . '"
+                     data-vendor="' . esc_attr( $vendor_id ) . '"
+                     data-nonce="' . esc_attr( wp_create_nonce( 'lt_mark_shipped_' . $order_id ) ) . '"
+                     style="color:#888;font-size:11px;padding:3px 8px;">
+                     &#10003; Already Shipped (no tracking)
+             </button>';
+        echo '<span class="lt-mark-shipped-msg" style="margin-left:6px;font-style:italic;color:#555;font-size:0.85em;"></span>';
+        echo '</div>';
+
+        echo '</div>'; // border-top wrapper
+        echo '</div>'; // lt-label-card
     }
 
     public static function render_rate_selector_public( int $order_id, int $vendor_id, array $rates ) {
@@ -176,7 +282,7 @@ class LT_Vendor_Dashboard {
 
     private static function render_rate_selector( int $order_id, int $vendor_id, array $rates ) {
         if ( empty( $rates ) ) {
-            echo '<p>No rates available for this shipment. Ensure vendor address and product dimensions are set.</p>';
+            echo '<p style="color:#888;">No rates available for this shipment. Ensure your store address and product dimensions are set.</p>';
             return;
         }
 
@@ -195,7 +301,7 @@ class LT_Vendor_Dashboard {
               </tr></thead><tbody>';
 
         foreach ( $rates as $rate ) {
-            if ( empty( $rate['amount'] ) || ( $rate['object_state'] ?? '' ) !== 'VALID' ) {
+            if ( empty( $rate['amount'] ) ) {
                 continue;
             }
             $carrier = esc_html( $rate['provider'] ?? 'Carrier' );
@@ -219,247 +325,29 @@ class LT_Vendor_Dashboard {
         }
 
         echo '</tbody></table>';
+        echo '<label style="display:inline-flex;align-items:center;gap:6px;margin-bottom:10px;font-size:0.9em;color:#555;cursor:pointer;">';
+        echo '<input type="checkbox" name="lt_notify" value="1" checked> Notify customer by email when label is purchased';
+        echo '</label>';
+        echo '<div class="lt-buy-label-msg" style="font-style:italic;color:#555;"></div>';
         echo '</form>';
     }
 
-    // -------------------------------------------------------------------------
-    // AJAX: buy label
-    // -------------------------------------------------------------------------
-
-    public static function ajax_buy_label() {
-        check_ajax_referer( 'lt_buy_label', 'lt_nonce' );
-
-        $order_id  = absint( $_POST['order_id'] ?? 0 );
-        $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
-        $rate_id   = sanitize_text_field( $_POST['rate_id'] ?? '' );
-
-        if ( ! $order_id || ! $vendor_id || ! $rate_id ) {
-            wp_send_json_error( 'Missing parameters.' );
-        }
-
-        // Confirm the current user is this vendor.
-        if ( (int) dokan_get_current_user_id() !== $vendor_id ) {
-            wp_send_json_error( 'Unauthorized.' );
-        }
-
-        // ── Resolve provider (vendor's own account or platform default) ────────
-        $context = LT_Provider_Factory::for_vendor( $vendor_id );
-        if ( is_wp_error( $context ) ) {
-            wp_send_json_error( $context->get_error_message() );
-        }
-
-        $provider           = $context['provider'];
-        $vendor_pays_direct = $context['vendor_pays_direct'];
-
-        // ── International vendor check ───────────────────────────────────────
-        // Non-US vendors must use their own account — no platform billing.
-        if ( ! $vendor_pays_direct ) {
-            $vendor_country = self::get_vendor_store_country( $vendor_id );
-            if ( $vendor_country && $vendor_country !== 'US' ) {
-                wp_send_json_error( 'International vendors must connect their own Shippo or ShipStation account to purchase labels. Connect your account in the Shipping Labels dashboard.' );
+    /**
+     * Get the carrier/service the customer picked at checkout for this vendor's shipment.
+     * Returns null for old orders that used a method without carrier meta.
+     */
+    private static function get_chosen_shipping_for_vendor( WC_Order $order, int $vendor_id ): ?array {
+        foreach ( $order->get_items( 'shipping' ) as $item ) {
+            if ( $item->get_method_id() === 'lt_shippo' && (int) $item->get_meta( 'vendor_id' ) === $vendor_id ) {
+                return [
+                    'carrier' => $item->get_meta( 'carrier' ) ?: $item->get_method_title(),
+                    'service' => $item->get_meta( 'service' ) ?: '',
+                    'days'    => $item->get_meta( 'estimated_days' ) ?: '',
+                    'cost'    => (float) $item->get_total(),
+                ];
             }
         }
-
-        // ── Find the cached rate object ──────────────────────────────────────
-        // We look it up server-side so the vendor cannot pass a fake price.
-        $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
-        $rate_object  = null;
-        $rate_amount  = 0.0;
-        $rate_currency = 'USD';
-
-        if ( $cached_rates ) {
-            foreach ( $cached_rates as $rate ) {
-                if ( ( $rate['object_id'] ?? '' ) === $rate_id ) {
-                    $rate_object   = $rate;
-                    $rate_amount   = (float) ( $rate['amount'] ?? 0 );
-                    $rate_currency = $rate['currency'] ?? 'USD';
-                    break;
-                }
-            }
-        }
-
-        // ── Balance deduction (platform account only) ─────────────────────────
-        $charge_amount = 0.0;
-
-        if ( ! $vendor_pays_direct ) {
-            // Apply platform markup.
-            $markup_pct    = (float) get_option( 'lt_shippo_label_markup_pct', 0 );
-            $charge_amount = $rate_amount * ( 1 + $markup_pct / 100 );
-
-            if ( $charge_amount > 0 ) {
-                $deducted = self::deduct_vendor_balance(
-                    $vendor_id,
-                    $charge_amount,
-                    $rate_currency,
-                    sprintf( 'Shipping label – Order #%d', $order_id )
-                );
-                if ( is_wp_error( $deducted ) ) {
-                    wp_send_json_error( $deducted->get_error_message() );
-                }
-            }
-        }
-
-        // ── Purchase label ───────────────────────────────────────────────────
-        $label_fmt = self::get_vendor_label_format( $vendor_id );
-
-        // ShipStation needs the full rate object to reconstruct the shipment.
-        // Shippo just needs the rate ID string.
-        $buy_arg = ( $context['type'] === 'shipstation' && $rate_object )
-            ? $rate_object
-            : $rate_id;
-
-        $txn = $provider->buy_label( $buy_arg, $label_fmt );
-
-        // If purchase fails, refund any balance already deducted.
-        if ( is_wp_error( $txn ) || ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
-            if ( ! $vendor_pays_direct && $charge_amount > 0 ) {
-                self::refund_vendor_balance(
-                    $vendor_id,
-                    $charge_amount,
-                    $rate_currency,
-                    sprintf( 'Refund – label purchase failed – Order #%d', $order_id )
-                );
-            }
-
-            $msg = is_wp_error( $txn )
-                ? $txn->get_error_message()
-                : ( $txn['messages'][0]['text'] ?? 'Label purchase failed.' );
-
-            wp_send_json_error( $msg );
-        }
-
-        $label_url    = $txn['label_url'];
-        $tracking_num = $txn['tracking_number'];
-
-        // Save to order meta.
-        $order = wc_get_order( $order_id );
-        update_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, $label_url );
-        update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
-        update_post_meta( $order_id, '_lt_shippo_label_cost_' . $vendor_id, $charge_amount );
-
-        if ( $vendor_pays_direct ) {
-            $billing_note = sprintf( 'Billed directly to vendor\'s own %s account.', strtoupper( $context['type'] ) );
-        } else {
-            $billing_note = sprintf( '$%.2f %s deducted from vendor balance.', $charge_amount, $rate_currency );
-        }
-
-        $order->add_order_note(
-            sprintf(
-                'Shipping label purchased by vendor #%d. %s Tracking: %s',
-                $vendor_id,
-                $billing_note,
-                $tracking_num
-            )
-        );
-
-        if ( in_array( $order->get_status(), [ 'processing', 'on-hold' ], true ) ) {
-            $order->update_status( 'completed', 'Label purchased and order marked complete.' );
-        }
-
-        wp_send_json_success( [
-            'label_url'          => $label_url,
-            'tracking_num'       => $tracking_num,
-            'amount_charged'     => $vendor_pays_direct ? '0.00' : number_format( $charge_amount, 2 ),
-            'currency'           => $rate_currency,
-            'vendor_pays_direct' => $vendor_pays_direct,
-        ] );
-    }
-
-    // -------------------------------------------------------------------------
-    // Dokan balance helpers
-    // -------------------------------------------------------------------------
-
-    /**
-     * Deduct an amount from a vendor's Dokan balance.
-     * Inserts a debit row into wp_dokan_vendor_balance.
-     *
-     * @return true|WP_Error
-     */
-    private static function deduct_vendor_balance( int $vendor_id, float $amount, string $currency, string $note ) {
-        $balance = self::get_vendor_available_balance( $vendor_id );
-
-        if ( $balance < $amount ) {
-            return new WP_Error(
-                'insufficient_balance',
-                sprintf(
-                    'Insufficient balance. Available: $%.2f. Label cost: $%.2f. Withdraw more earnings first.',
-                    $balance,
-                    $amount
-                )
-            );
-        }
-
-        return self::insert_balance_row( $vendor_id, $amount, 0, 'shipping_label', $note );
-    }
-
-    /**
-     * Refund a previously deducted amount back to the vendor's balance.
-     */
-    private static function refund_vendor_balance( int $vendor_id, float $amount, string $currency, string $note ): void {
-        self::insert_balance_row( $vendor_id, 0, $amount, 'shipping_label_refund', $note );
-    }
-
-    /**
-     * Insert a row into Dokan's vendor balance table.
-     *
-     * @param float $debit  Amount to subtract (use 0 for credits).
-     * @param float $credit Amount to add (use 0 for debits).
-     */
-    private static function insert_balance_row( int $vendor_id, float $debit, float $credit, string $trn_type, string $note ) {
-        global $wpdb;
-
-        $table = $wpdb->prefix . 'dokan_vendor_balance';
-
-        // Check the table exists (requires Dokan to be active).
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-        $exists = $wpdb->get_var( "SHOW TABLES LIKE '{$table}'" );
-        if ( ! $exists ) {
-            return new WP_Error( 'dokan_missing', 'Dokan balance table not found.' );
-        }
-
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-        $wpdb->insert(
-            $table,
-            [
-                'vendor_id'    => $vendor_id,
-                'trn_id'       => 0,
-                'trn_type'     => $trn_type,
-                'perticulars'  => $note,   // Dokan's column name has the typo "perticulars"
-                'debit'        => $debit,
-                'credit'       => $credit,
-                'status'       => 'approved',
-                'trn_date'     => current_time( 'mysql' ),
-                'balance_date' => current_time( 'mysql' ),
-            ],
-            [ '%d', '%d', '%s', '%s', '%f', '%f', '%s', '%s', '%s' ]
-        );
-
-        return true;
-    }
-
-    /**
-     * Get a vendor's net available balance (credits minus debits).
-     * Uses Dokan's own function if available, otherwise queries directly.
-     */
-    private static function get_vendor_available_balance( int $vendor_id ): float {
-        // Dokan Lite exposes dokan_get_seller_balance() — use it if present.
-        if ( function_exists( 'dokan_get_seller_balance' ) ) {
-            return (float) dokan_get_seller_balance( $vendor_id, false );
-        }
-
-        // Fallback: query the balance table directly.
-        global $wpdb;
-        $table = $wpdb->prefix . 'dokan_vendor_balance';
-
-        // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-        $row = $wpdb->get_row(
-            $wpdb->prepare(
-                "SELECT SUM(credit) - SUM(debit) AS net FROM {$table} WHERE vendor_id = %d AND status = 'approved'",
-                $vendor_id
-            )
-        );
-
-        return $row ? (float) $row->net : 0.0;
+        return null;
     }
 
     // -------------------------------------------------------------------------
@@ -475,7 +363,7 @@ class LT_Vendor_Dashboard {
             'lt-vendor-shipping',
             LT_SHIPPING_URL . 'assets/vendor-shipping.js',
             [ 'jquery' ],
-            '1.0.0',
+            '1.0.6',
             true
         );
 
@@ -486,121 +374,137 @@ class LT_Vendor_Dashboard {
     }
 
     // -------------------------------------------------------------------------
+    // Shipment recording helper
+    // -------------------------------------------------------------------------
+
+    /**
+     * Add tracking to the Shipments section via Advanced Shipment Tracking (AST)
+     * if it's active. Does NOT use add_order_note() so the customer only receives
+     * AST's purpose-built tracking email (if $notify is true), not a raw WC note.
+     *
+     * Falls back to a private order note (not customer-facing) when AST is absent.
+     */
+    private static function record_shipment( WC_Order $order, string $carrier, string $tracking_num, bool $notify ): void {
+        $order_id = $order->get_id();
+
+        // ── Advanced Shipment Tracking (AST) by Zorem ────────────────────────
+        if ( class_exists( 'WC_Advanced_Shipment_Tracking_Actions' ) ) {
+            $ast  = WC_Advanced_Shipment_Tracking_Actions::get_instance();
+            $item = $ast->add_tracking_item( $order_id, [
+                'tracking_provider' => $carrier,
+                'tracking_number'   => $tracking_num,
+                'date_shipped'      => date( 'Y-m-d' ),
+                'status_shipped'    => 1,   // 1 = "On the way"
+            ] );
+
+            if ( $notify && method_exists( $ast, 'send_customer_email' ) ) {
+                $item_id = is_array( $item ) ? ( $item['tracking_id'] ?? 0 ) : (int) $item;
+                if ( $item_id ) {
+                    $ast->send_customer_email( $order_id, $item_id );
+                }
+            }
+            return;
+        }
+
+        // ── WooCommerce Shipment Tracking (official extension) ────────────────
+        if ( class_exists( 'WC_Shipment_Tracking_Actions' ) ) {
+            $wc_st = WC_Shipment_Tracking_Actions::get_instance();
+            $wc_st->add_tracking_item( $order_id, [
+                'tracking_provider' => $carrier,
+                'tracking_number'   => $tracking_num,
+                'date_shipped'      => time(),
+                'status_shipped'    => 1,
+            ] );
+            // Official plugin sends its own email on add; no extra call needed.
+            return;
+        }
+
+        // ── Fallback: internal (private) order note only ──────────────────────
+        if ( $notify ) {
+            $store      = function_exists( 'dokan_get_store_info' ) ? dokan_get_store_info( 0 ) : [];
+            $order->add_order_note(
+                sprintf( 'Shipped via %s. Tracking: %s', $carrier, $tracking_num ),
+                1   // customer-facing; only reached when no tracking plugin is present
+            );
+        } else {
+            $order->add_order_note(
+                sprintf( '[LT] Tracking recorded: %s via %s (customer not notified)', $tracking_num, $carrier ),
+                0   // internal note only
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Data helpers
     // -------------------------------------------------------------------------
 
     /**
-     * Get orders for this vendor that don't have a label yet.
+     * Get all processing orders for this vendor.
      *
      * @return WC_Order[]
      */
-    private static function get_vendor_orders_needing_label( int $vendor_id ): array {
-        // Get order IDs from Dokan.
-        if ( ! function_exists( 'dokan_get_seller_orders' ) ) {
+    /**
+     * Verify that at least one item in the order was sold by this vendor.
+     * Prevents IDOR: a vendor modifying another vendor's order data.
+     */
+    private static function vendor_owns_order( int $order_id, int $vendor_id ): bool {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return false;
+        }
+        foreach ( $order->get_items() as $item ) {
+            $product_id = $item->get_product_id();
+            if ( $product_id && (int) get_post_field( 'post_author', $product_id ) === $vendor_id ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Query Dokan's shipment tracking table for a given order + vendor.
+     */
+    private static function get_dokan_tracking_items( int $order_id, int $vendor_id ): array {
+        global $wpdb;
+        $table = $wpdb->prefix . 'dokan_shipping_tracking';
+        // Check the table exists first (parameterized to prevent SQL injection).
+        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) !== $table ) {
+            return [];
+        }
+        $rows = $wpdb->get_results( $wpdb->prepare(
+            "SELECT * FROM {$table} WHERE order_id = %d AND seller_id = %d",
+            $order_id,
+            $vendor_id
+        ) );
+        return $rows ?: [];
+    }
+
+    private static function get_vendor_orders( int $vendor_id ): array {
+        if ( ! function_exists( 'dokan' ) ) {
             return [];
         }
 
         $args = [
             'seller_id' => $vendor_id,
-            'status'    => [ 'wc-processing', 'wc-on-hold' ],
+            'status'    => [ 'processing', 'completed' ],
             'paged'     => 1,
-            'limit'     => 20,
+            'limit'     => 50,
         ];
 
-        $result = dokan_get_seller_orders( $args );
-        $orders = [];
+        $result = dokan()->order->all( $args );
 
-        if ( ! empty( $result['orders'] ) ) {
-            foreach ( $result['orders'] as $order_data ) {
-                $order = wc_get_order( $order_data->order_id ?? $order_data->ID ?? 0 );
-                if ( $order ) {
-                    $orders[] = $order;
-                }
+        if ( empty( $result ) || ! is_array( $result ) ) {
+            return [];
+        }
+
+        $orders = [];
+        foreach ( $result as $order ) {
+            if ( $order instanceof WC_Order ) {
+                $orders[] = $order;
             }
         }
 
         return $orders;
-    }
-
-    /**
-     * Render the label format preference panel shown on the vendor dashboard.
-     */
-    private static function render_label_format_panel( int $vendor_id ): void {
-        $saved = get_user_meta( $vendor_id, '_lt_label_format', true ) ?: '';
-        $formats = [
-            ''        => 'Platform default (set by admin)',
-            'PDF'     => 'Full Page PDF (8.5" × 11") — no label printer, print on regular paper',
-            'PDF_4x6' => '4" × 6" PDF — label printer (Rollo, Dymo 4XL, etc.)',
-            'ZPLII'   => 'ZPL / Thermal — Zebra or compatible thermal printer',
-        ];
-        ?>
-        <div class="lt-label-format-panel" style="border:1px solid #e6e6e6;padding:20px;margin-bottom:28px;border-radius:4px;">
-            <h3 style="margin-top:0;">Label Format</h3>
-            <p style="margin-bottom:12px;">Choose how your shipping labels are generated. Select the option that matches your printer setup.</p>
-            <?php wp_nonce_field( 'lt_label_format', 'lt_format_nonce' ); ?>
-            <?php foreach ( $formats as $val => $desc ) : ?>
-                <label style="display:block;margin-bottom:8px;cursor:pointer;">
-                    <input type="radio" name="lt_label_format_choice" value="<?php echo esc_attr( $val ); ?>"
-                           class="lt-format-radio" <?php checked( $saved, $val ); ?>>
-                    <?php echo esc_html( $desc ); ?>
-                </label>
-            <?php endforeach; ?>
-            <p id="lt-format-msg" style="margin-top:8px;font-style:italic;color:#555;"></p>
-        </div>
-        <?php
-    }
-
-    // -------------------------------------------------------------------------
-    // AJAX: save vendor label format preference
-    // -------------------------------------------------------------------------
-
-    public static function ajax_save_label_format(): void {
-        check_ajax_referer( 'lt_label_format', 'lt_format_nonce' );
-
-        $vendor_id = (int) dokan_get_current_user_id();
-        if ( ! $vendor_id ) {
-            wp_send_json_error( 'Unauthorized.' );
-        }
-
-        $allowed = [ '', 'PDF', 'PDF_4x6', 'ZPLII' ];
-        $format  = sanitize_text_field( $_POST['lt_label_format'] ?? '' );
-
-        if ( ! in_array( $format, $allowed, true ) ) {
-            wp_send_json_error( 'Invalid format.' );
-        }
-
-        if ( $format === '' ) {
-            delete_user_meta( $vendor_id, '_lt_label_format' );
-        } else {
-            update_user_meta( $vendor_id, '_lt_label_format', $format );
-        }
-
-        wp_send_json_success();
-    }
-
-    /**
-     * Get the label format to use for a vendor.
-     * Uses vendor's own preference if set, falls back to platform admin setting.
-     */
-    private static function get_vendor_label_format( int $vendor_id ): string {
-        $vendor_pref = get_user_meta( $vendor_id, '_lt_label_format', true );
-        if ( $vendor_pref ) {
-            return $vendor_pref;
-        }
-        return get_option( 'lt_shippo_label_format', 'PDF' );
-    }
-
-    /**
-     * Get the 2-letter country code from the vendor's Dokan store address.
-     * Returns null if Dokan is not active or the vendor has no address set.
-     */
-    private static function get_vendor_store_country( int $vendor_id ): ?string {
-        if ( ! function_exists( 'dokan_get_store_info' ) ) {
-            return null;
-        }
-        $info    = dokan_get_store_info( $vendor_id );
-        $country = $info['address']['country'] ?? '';
-        return $country ? strtoupper( $country ) : null;
     }
 
     // -------------------------------------------------------------------------
@@ -608,12 +512,14 @@ class LT_Vendor_Dashboard {
     // -------------------------------------------------------------------------
 
     public static function render_shipping_prefs_panel( int $vendor_id ): void {
-        $mode         = get_user_meta( $vendor_id, '_lt_ship_mode', true )       ?: 'live';
-        $flat_cost    = get_user_meta( $vendor_id, '_lt_ship_flat_cost', true )  ?: '';
-        $flat_label   = get_user_meta( $vendor_id, '_lt_ship_flat_label', true ) ?: '';
-        $carriers_raw = get_user_meta( $vendor_id, '_lt_ship_carriers', true )   ?: '[]';
-        $carriers     = json_decode( $carriers_raw, true ) ?: [];
-        $known_carriers = [ 'USPS', 'UPS', 'FedEx', 'DHL Express', 'Canada Post', 'Australia Post' ];
+        $mode              = get_user_meta( $vendor_id, '_lt_ship_mode', true )            ?: 'live';
+        $flat_cost         = get_user_meta( $vendor_id, '_lt_ship_flat_cost', true )       ?: '';
+        $flat_label        = get_user_meta( $vendor_id, '_lt_ship_flat_label', true )      ?: '';
+        $carriers_raw      = get_user_meta( $vendor_id, '_lt_ship_carriers', true )        ?: '[]';
+        $carriers          = json_decode( $carriers_raw, true ) ?: [];
+        $handling_type     = get_user_meta( $vendor_id, '_lt_ship_handling_type', true )   ?: 'none';
+        $handling_amount   = get_user_meta( $vendor_id, '_lt_ship_handling_amount', true ) ?: '';
+        $known_carriers    = [ 'USPS', 'UPS', 'FedEx', 'DHL Express', 'Canada Post', 'Australia Post' ];
         ?>
         <div class="lt-ship-prefs-panel" style="border:1px solid #e6e6e6;padding:20px;margin-bottom:28px;border-radius:4px;">
             <h3 style="margin-top:0;">Shipping Method</h3>
@@ -633,6 +539,27 @@ class LT_Vendor_Dashboard {
                         <?php echo esc_html( $c ); ?>
                     </label>
                 <?php endforeach; ?>
+                <p style="margin:10px 0 6px;color:#555;font-size:0.9em;"><strong>Handling fee</strong> (added on top of each live rate):</p>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                    <label style="margin-right:4px;">
+                        <input type="radio" name="lt_ship_handling_type" value="none" <?php checked( $handling_type, 'none' ); ?>> None
+                    </label>
+                    <label style="margin-right:4px;">
+                        <input type="radio" name="lt_ship_handling_type" value="fixed" <?php checked( $handling_type, 'fixed' ); ?>> Fixed ($)
+                    </label>
+                    <label>
+                        <input type="radio" name="lt_ship_handling_type" value="percent" <?php checked( $handling_type, 'percent' ); ?>> Percentage (%)
+                    </label>
+                </div>
+                <div id="lt-handling-amount-wrap" style="margin-top:6px;<?php echo $handling_type === 'none' ? 'display:none;' : ''; ?>">
+                    <input type="number" name="lt_ship_handling_amount"
+                           value="<?php echo esc_attr( $handling_amount ); ?>"
+                           min="0" step="0.01" placeholder="e.g. 2.50"
+                           class="dokan-form-control" style="max-width:120px;">
+                    <span id="lt-handling-unit" style="margin-left:4px;color:#555;">
+                        <?php echo $handling_type === 'percent' ? '%' : '$'; ?>
+                    </span>
+                </div>
             </div>
 
             <label style="display:block;margin-bottom:10px;">
@@ -670,13 +597,25 @@ class LT_Vendor_Dashboard {
                 }
                 modes.forEach(function(r){ r.addEventListener('change', toggleSections); });
 
+                // Handling fee type toggle.
+                document.querySelectorAll('input[name="lt_ship_handling_type"]').forEach(function(r){
+                    r.addEventListener('change', function(){
+                        var wrap = document.getElementById('lt-handling-amount-wrap');
+                        var unit = document.getElementById('lt-handling-unit');
+                        wrap.style.display = this.value === 'none' ? 'none' : 'block';
+                        unit.textContent   = this.value === 'percent' ? '%' : '$';
+                    });
+                });
+
                 document.getElementById('lt-save-ship-prefs').addEventListener('click', function(){
-                    var mode      = document.querySelector('input[name="lt_ship_mode"]:checked').value;
-                    var carriers  = Array.from(document.querySelectorAll('input[name="lt_ship_carriers[]"]:checked')).map(function(c){return c.value;});
-                    var flatCost  = document.querySelector('input[name="lt_ship_flat_cost"]').value;
-                    var flatLabel = document.querySelector('input[name="lt_ship_flat_label"]').value;
-                    var nonce     = document.querySelector('input[name="lt_prefs_nonce"]').value;
-                    var msg       = document.getElementById('lt-prefs-msg');
+                    var mode            = document.querySelector('input[name="lt_ship_mode"]:checked').value;
+                    var carriers        = Array.from(document.querySelectorAll('input[name="lt_ship_carriers[]"]:checked')).map(function(c){return c.value;});
+                    var flatCost        = document.querySelector('input[name="lt_ship_flat_cost"]').value;
+                    var flatLabel       = document.querySelector('input[name="lt_ship_flat_label"]').value;
+                    var handlingType    = document.querySelector('input[name="lt_ship_handling_type"]:checked').value;
+                    var handlingAmount  = document.querySelector('input[name="lt_ship_handling_amount"]').value;
+                    var nonce           = document.querySelector('input[name="lt_prefs_nonce"]').value;
+                    var msg             = document.getElementById('lt-prefs-msg');
                     msg.textContent = 'Saving...';
                     fetch(ltShipping.ajaxUrl, {
                         method: 'POST',
@@ -687,7 +626,9 @@ class LT_Vendor_Dashboard {
                             lt_ship_mode: mode,
                             lt_ship_flat_cost: flatCost,
                             lt_ship_flat_label: flatLabel,
-                            lt_ship_carriers: JSON.stringify(carriers)
+                            lt_ship_carriers: JSON.stringify(carriers),
+                            lt_ship_handling_type: handlingType,
+                            lt_ship_handling_amount: handlingAmount
                         })
                     }).then(function(r){return r.json();}).then(function(d){
                         msg.textContent = d.success ? 'Saved!' : ('Error: ' + (d.data || 'unknown'));
@@ -697,6 +638,93 @@ class LT_Vendor_Dashboard {
             </script>
         </div>
         <?php
+    }
+
+    // -------------------------------------------------------------------------
+    // AJAX: buy label using vendor's own Shippo account
+    // -------------------------------------------------------------------------
+
+    public static function ajax_buy_label(): void {
+        check_ajax_referer( 'lt_buy_label', 'lt_nonce' );
+
+        $order_id  = absint( $_POST['order_id'] ?? 0 );
+        $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
+        $rate_id   = sanitize_text_field( $_POST['rate_id'] ?? '' );
+
+        if ( ! $order_id || ! $vendor_id || ! $rate_id ) {
+            wp_send_json_error( 'Missing parameters.' );
+        }
+
+        if ( (int) dokan_get_current_user_id() !== $vendor_id ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        if ( ! self::vendor_owns_order( $order_id, $vendor_id ) ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        // Validate rate_id against the cached rates for this order — prevents spoofing
+        // a rate ID from a different shipment or a cheaper/invalid carrier.
+        $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
+        $rate_valid   = false;
+        if ( is_array( $cached_rates ) ) {
+            foreach ( $cached_rates as $rate ) {
+                if ( ( $rate['object_id'] ?? '' ) === $rate_id ) {
+                    $rate_valid = true;
+                    break;
+                }
+            }
+        }
+        if ( ! $rate_valid ) {
+            wp_send_json_error( 'Invalid or expired rate selection. Please refresh the rates and try again.' );
+        }
+
+        $creds = LT_Vendor_Credentials::get( $vendor_id );
+        if ( ! $creds || $creds['type'] !== 'shippo' ) {
+            wp_send_json_error( 'No Shippo account connected.' );
+        }
+
+        $shippo    = new LT_Shippo_API( $creds['key'] );
+        $label_fmt = get_user_meta( $vendor_id, '_lt_label_format', true ) ?: 'PDF_4x6';
+        $txn       = $shippo->buy_label( $rate_id, $label_fmt );
+
+        if ( is_wp_error( $txn ) ) {
+            error_log( '[LT Shipping] Shippo buy_label error for order ' . $order_id . ': ' . $txn->get_error_message() . ' | data: ' . wp_json_encode( $txn->get_error_data() ) );
+            wp_send_json_error( 'Label purchase failed. Please check your Shippo account and try again.' );
+        }
+
+        if ( ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
+            error_log( '[LT Shipping] Shippo buy_label non-success for order ' . $order_id . ': ' . wp_json_encode( $txn['messages'] ?? [] ) );
+            wp_send_json_error( 'Label purchase failed. Please check your Shippo account and try again.' );
+        }
+
+        $label_url    = $txn['label_url'];
+        $tracking_num = $txn['tracking_number'];
+        $notify       = ! empty( $_POST['notify'] );
+
+        // Resolve carrier name from cached rates so we can populate the Shipments section.
+        $carrier      = 'Other';
+        $cached_rates = get_transient( 'lt_shippo_rates_' . $order_id . '_' . $vendor_id );
+        if ( is_array( $cached_rates ) ) {
+            foreach ( $cached_rates as $rate ) {
+                if ( ( $rate['object_id'] ?? '' ) === $rate_id ) {
+                    $carrier = $rate['provider'] ?? 'Other';
+                    break;
+                }
+            }
+        }
+
+        $order = wc_get_order( $order_id );
+        update_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, $label_url );
+        update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
+        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+
+        self::record_shipment( $order, $carrier, $tracking_num, $notify );
+
+        wp_send_json_success( [
+            'label_url'    => $label_url,
+            'tracking_num' => $tracking_num,
+        ] );
     }
 
     public static function ajax_save_ship_prefs(): void {
@@ -711,7 +739,7 @@ class LT_Vendor_Dashboard {
             $mode = 'live';
         }
         update_user_meta( $vendor_id, '_lt_ship_mode', $mode );
-        update_user_meta( $vendor_id, '_lt_ship_flat_cost',  (float) ( $_POST['lt_ship_flat_cost'] ?? 0 ) );
+        update_user_meta( $vendor_id, '_lt_ship_flat_cost', max( 0, (float) ( $_POST['lt_ship_flat_cost'] ?? 0 ) ) );
         update_user_meta( $vendor_id, '_lt_ship_flat_label', sanitize_text_field( $_POST['lt_ship_flat_label'] ?? '' ) );
 
         $carriers_raw = sanitize_text_field( $_POST['lt_ship_carriers'] ?? '[]' );
@@ -719,11 +747,96 @@ class LT_Vendor_Dashboard {
         $carriers     = is_array( $carriers ) ? array_map( 'sanitize_text_field', $carriers ) : [];
         update_user_meta( $vendor_id, '_lt_ship_carriers', wp_json_encode( $carriers ) );
 
+        $handling_type = sanitize_key( $_POST['lt_ship_handling_type'] ?? 'none' );
+        if ( ! in_array( $handling_type, [ 'none', 'fixed', 'percent' ], true ) ) {
+            $handling_type = 'none';
+        }
+        update_user_meta( $vendor_id, '_lt_ship_handling_type', $handling_type );
+        update_user_meta( $vendor_id, '_lt_ship_handling_amount', max( 0, (float) ( $_POST['lt_ship_handling_amount'] ?? 0 ) ) );
+
         // Bust rate cache so changes take effect immediately at checkout.
         global $wpdb;
         $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE '_transient_lt_rates_%' OR option_name LIKE '_transient_timeout_lt_rates_%'" );
 
         wp_send_json_success();
+    }
+
+    // -------------------------------------------------------------------------
+    // AJAX: mark order as already shipped (dismiss from label queue)
+    // -------------------------------------------------------------------------
+
+    public static function ajax_mark_shipped(): void {
+        $order_id  = absint( $_POST['order_id'] ?? 0 );
+        $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
+
+        if ( ! $order_id || ! $vendor_id ) {
+            wp_send_json_error( 'Missing parameters.' );
+        }
+
+        // Nonce check first — order_id is required to build the nonce action but
+        // only absint() has been applied so no harm in reading it before verification.
+        check_ajax_referer( 'lt_mark_shipped_' . $order_id, 'nonce' );
+
+        if ( (int) dokan_get_current_user_id() !== $vendor_id ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        if ( ! self::vendor_owns_order( $order_id, $vendor_id ) ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+
+        wp_send_json_success();
+    }
+
+    // -------------------------------------------------------------------------
+    // AJAX: save tracking number and notify customer
+    // -------------------------------------------------------------------------
+
+    public static function ajax_save_tracking(): void {
+        $order_id  = absint( $_POST['order_id'] ?? 0 );
+        $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
+        $tracking  = sanitize_text_field( $_POST['tracking'] ?? '' );
+
+        if ( ! $order_id || ! $vendor_id || ! $tracking ) {
+            wp_send_json_error( 'Missing parameters.' );
+        }
+
+        check_ajax_referer( 'lt_save_tracking_' . $order_id, 'nonce' );
+
+        if ( (int) dokan_get_current_user_id() !== $vendor_id ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        if ( ! self::vendor_owns_order( $order_id, $vendor_id ) ) {
+            wp_send_json_error( 'Unauthorized.' );
+        }
+
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            wp_send_json_error( 'Order not found.' );
+        }
+
+        $notify = ! empty( $_POST['notify'] );
+
+        // Resolve carrier from the customer's chosen shipping method.
+        $carrier = 'Other';
+        foreach ( $order->get_items( 'shipping' ) as $item ) {
+            if ( (int) $item->get_meta( 'vendor_id' ) === $vendor_id || $item->get_method_id() === 'lt_shippo' ) {
+                $carrier = $item->get_meta( 'carrier' ) ?: $item->get_method_title() ?: 'Other';
+                break;
+            }
+            $carrier = $item->get_method_title() ?: 'Other';
+            break;
+        }
+
+        update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking );
+        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+
+        self::record_shipment( $order, $carrier, $tracking, $notify );
+
+        wp_send_json_success( [ 'tracking' => $tracking ] );
     }
 }
 

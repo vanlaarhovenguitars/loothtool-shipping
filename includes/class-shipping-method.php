@@ -99,7 +99,8 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
 
         // Cache key based on stable inputs — Shippo UUIDs change every call,
         // so we cache by vendor+destination+weight to keep rate IDs stable.
-        $cache_key = 'lt_rates_' . md5( $vendor_id . $to['zip'] . $to['country'] . round( $parcel['weight'], 2 ) );
+        // Salt the hash with the auth key so cache keys are not predictable by external parties.
+        $cache_key = 'lt_rates_' . md5( wp_salt( 'auth' ) . $vendor_id . $to['zip'] . $to['country'] . round( $parcel['weight'], 2 ) );
         $rates = get_transient( $cache_key );
 
         if ( $rates === false ) {
@@ -125,6 +126,10 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
             return;
         }
 
+        // Vendor handling fee applied on top of each live rate.
+        $handling_type   = get_user_meta( $vendor_id, '_lt_ship_handling_type', true )   ?: 'none';
+        $handling_amount = (float) ( get_user_meta( $vendor_id, '_lt_ship_handling_amount', true ) ?: 0 );
+
         // Expose each returned rate as a WooCommerce shipping option.
         foreach ( $rates as $rate ) {
             // Only offer rates that have an actual price.
@@ -137,6 +142,14 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
             $days     = isset( $rate['estimated_days'] ) ? ' (' . $rate['estimated_days'] . ' days)' : '';
             $label    = $carrier . ' ' . $service . $days;
             $cost     = (float) $rate['amount'];
+
+            // Apply handling fee.
+            if ( $handling_type === 'fixed' && $handling_amount > 0 ) {
+                $cost += $handling_amount;
+            } elseif ( $handling_type === 'percent' && $handling_amount > 0 ) {
+                $cost += $cost * ( $handling_amount / 100 );
+            }
+            $cost = round( $cost, 2 );
 
             // Use a stable rate ID based on carrier+service so selections survive
             // across checkout re-renders (Shippo object_id changes on every API call).
@@ -219,10 +232,10 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
         $max_width    = 0;
         $total_height = 0;
 
-        $default_weight = (float) get_option( 'lt_shippo_default_weight', 1 );
-        $default_length = (float) get_option( 'lt_shippo_default_length', 12 );
-        $default_width  = (float) get_option( 'lt_shippo_default_width', 9 );
-        $default_height = (float) get_option( 'lt_shippo_default_height', 4 );
+        $default_weight = max( 0.1, (float) get_option( 'lt_shippo_default_weight', 1 ) );
+        $default_length = max( 0.1, (float) get_option( 'lt_shippo_default_length', 12 ) );
+        $default_width  = max( 0.1, (float) get_option( 'lt_shippo_default_width', 9 ) );
+        $default_height = max( 0.1, (float) get_option( 'lt_shippo_default_height', 4 ) );
 
         foreach ( $contents as $item ) {
             $product  = $item['data'];
