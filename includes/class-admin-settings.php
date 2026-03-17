@@ -86,7 +86,7 @@ class LT_Admin_Settings {
                     </tr>
                 </table>
 
-                <div id="lt-admin-shippo-fields" <?php echo $provider !== 'shippo' ? 'style="display:none"' : ''; ?>>
+                <div id="lt-admin-shippo-fields"<?php if ( $provider !== 'shippo' ) echo ' style="display:none"'; ?>>
                     <h3>Shippo</h3>
                     <table class="form-table">
                         <tr>
@@ -104,7 +104,7 @@ class LT_Admin_Settings {
                     </table>
                 </div>
 
-                <div id="lt-admin-ss-fields" <?php echo $provider !== 'shipstation' ? 'style="display:none"' : ''; ?>>
+                <div id="lt-admin-ss-fields"<?php if ( $provider !== 'shipstation' ) echo ' style="display:none"'; ?>>
                     <h3>ShipStation</h3>
                     <table class="form-table">
                         <tr>
@@ -198,7 +198,7 @@ class LT_Admin_Settings {
                         <th><?php echo esc_html( $label ); ?></th>
                         <td>
                             <input type="text"
-                                   name="lt_shippo_from_address[<?php echo $key; ?>]"
+                                   name="lt_shippo_from_address[<?php echo esc_attr( $key ); ?>]"
                                    value="<?php echo esc_attr( $val ); ?>"
                                    class="regular-text" />
                         </td>

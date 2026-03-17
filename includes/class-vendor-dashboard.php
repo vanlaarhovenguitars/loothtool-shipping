@@ -108,9 +108,9 @@ class LT_Vendor_Dashboard {
         foreach ( $orders as $order ) {
             $oid = $order->get_id();
             $has_lt_meta = (
-                get_post_meta( $oid, '_lt_shippo_label_url_' . $vendor_id, true ) ||
-                get_post_meta( $oid, '_lt_shippo_tracking_' . $vendor_id, true ) ||
-                get_post_meta( $oid, '_lt_manually_shipped_' . $vendor_id, true )
+                $order->get_meta( '_lt_shippo_label_url_' . $vendor_id ) ||
+                $order->get_meta( '_lt_shippo_tracking_' . $vendor_id ) ||
+                $order->get_meta( '_lt_manually_shipped_' . $vendor_id )
             );
             $has_dokan_tracking = ! empty( self::get_dokan_tracking_items( $oid, $vendor_id ) );
             if ( $has_lt_meta || $has_dokan_tracking ) {
@@ -145,9 +145,11 @@ class LT_Vendor_Dashboard {
 
     private static function render_order_label_card( WC_Order $order, int $vendor_id, bool $is_shipped ) {
         $order_id       = $order->get_id();
-        $existing_label = get_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, true );
-        $tracking_num   = get_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, true );
-        $manually_ship  = get_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, true );
+        $existing_label = $order->get_meta( '_lt_shippo_label_url_' . $vendor_id );
+        $tracking_num   = $order->get_meta( '_lt_shippo_tracking_' . $vendor_id );
+        $manually_ship  = $order->get_meta( '_lt_manually_shipped_' . $vendor_id );
+        $is_gift        = $order->get_meta( '_lt_is_gift' ) === '1';
+        $slip_nonce     = wp_create_nonce( 'lt_packing_slip_' . $order_id );
 
         // Pull Dokan shipment tracking items as fallback.
         $dokan_tracking = self::get_dokan_tracking_items( $order_id, $vendor_id );
@@ -176,6 +178,25 @@ class LT_Vendor_Dashboard {
                         class="dokan-btn dokan-btn-sm dokan-btn-theme"
                         style="display:inline-block;padding:4px 10px;font-size:12px;">
                         &#128438; Download Label
+                     </a>';
+            }
+            if ( $is_gift ) {
+                echo '<span style="color:#a42325;font-weight:600;font-size:12px;">&#127873; Gift Order</span>';
+            }
+            // Print button — gift receipt for gift orders, packing slip otherwise.
+            if ( $is_gift ) {
+                $gift_url = admin_url( 'admin-ajax.php?action=lt_packing_slip&order_id=' . $order_id . '&vendor_id=' . $vendor_id . '&mode=gift&_wpnonce=' . $slip_nonce );
+                echo '<a href="' . esc_url( $gift_url ) . '" target="_blank"
+                        class="dokan-btn dokan-btn-sm dokan-btn-default"
+                        style="display:inline-block;padding:4px 10px;font-size:12px;color:#a42325;">
+                        &#127873; Gift Receipt
+                     </a>';
+            } else {
+                $slip_url = admin_url( 'admin-ajax.php?action=lt_packing_slip&order_id=' . $order_id . '&vendor_id=' . $vendor_id . '&mode=standard&_wpnonce=' . $slip_nonce );
+                echo '<a href="' . esc_url( $slip_url ) . '" target="_blank"
+                        class="dokan-btn dokan-btn-sm dokan-btn-default"
+                        style="display:inline-block;padding:4px 10px;font-size:12px;">
+                        &#128424; Packing Slip
                      </a>';
             }
             echo '</div>';
@@ -215,6 +236,9 @@ class LT_Vendor_Dashboard {
         // Compact header row.
         echo '<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;margin-bottom:8px;">';
         echo '<strong style="font-size:1em;">Order #' . esc_html( $order->get_order_number() ) . '</strong>';
+        if ( $is_gift ) {
+            echo '<span style="color:#a42325;font-weight:600;font-size:0.88em;">&#127873; Gift Order</span>';
+        }
         echo '<span>' . esc_html( $order->get_formatted_billing_full_name() ) . '</span>';
         if ( $to_parts ) {
             echo '<span style="color:#777;font-size:0.88em;">&#9993; ' . esc_html( implode( ', ', $to_parts ) ) . '</span>';
@@ -270,6 +294,25 @@ class LT_Vendor_Dashboard {
                      &#10003; Already Shipped (no tracking)
              </button>';
         echo '<span class="lt-mark-shipped-msg" style="margin-left:6px;font-style:italic;color:#555;font-size:0.85em;"></span>';
+        echo '</div>';
+
+        // Print packing slip / gift receipt buttons.
+        echo '<div style="margin-top:10px;padding-top:8px;border-top:1px solid #f0f0f0;display:flex;flex-wrap:wrap;gap:8px;">';
+        if ( $is_gift ) {
+            $gift_url = admin_url( 'admin-ajax.php?action=lt_packing_slip&order_id=' . $order_id . '&vendor_id=' . $vendor_id . '&mode=gift&_wpnonce=' . $slip_nonce );
+            echo '<a href="' . esc_url( $gift_url ) . '" target="_blank"
+                    class="dokan-btn dokan-btn-sm dokan-btn-default"
+                    style="font-size:12px;padding:4px 10px;color:#a42325;">
+                    &#127873; Print Gift Receipt
+                 </a>';
+        } else {
+            $slip_url = admin_url( 'admin-ajax.php?action=lt_packing_slip&order_id=' . $order_id . '&vendor_id=' . $vendor_id . '&mode=standard&_wpnonce=' . $slip_nonce );
+            echo '<a href="' . esc_url( $slip_url ) . '" target="_blank"
+                    class="dokan-btn dokan-btn-sm dokan-btn-default"
+                    style="font-size:12px;padding:4px 10px;">
+                    &#128424; Print Packing Slip
+                 </a>';
+        }
         echo '</div>';
 
         echo '</div>'; // border-top wrapper
@@ -393,7 +436,7 @@ class LT_Vendor_Dashboard {
             $item = $ast->add_tracking_item( $order_id, [
                 'tracking_provider' => $carrier,
                 'tracking_number'   => $tracking_num,
-                'date_shipped'      => date( 'Y-m-d' ),
+                'date_shipped'      => gmdate( 'Y-m-d' ),
                 'status_shipped'    => 1,   // 1 = "On the way"
             ] );
 
@@ -530,7 +573,7 @@ class LT_Vendor_Dashboard {
                 <input type="radio" name="lt_ship_mode" value="live" <?php checked( $mode, 'live' ); ?>>
                 <strong>Live Rates</strong> — real-time rates from your shipping carrier(s)
             </label>
-            <div id="lt-carrier-options" style="margin-left:24px;margin-bottom:12px;<?php echo $mode !== 'live' ? 'display:none;' : ''; ?>">
+            <div id="lt-carrier-options" style="margin-left:24px;margin-bottom:12px;<?php echo esc_attr( $mode !== 'live' ? 'display:none;' : '' ); ?>">
                 <p style="margin:4px 0 8px;color:#555;font-size:0.9em;">Show only these carriers (leave all unchecked to show all):</p>
                 <?php foreach ( $known_carriers as $c ) : ?>
                     <label style="display:inline-block;margin-right:16px;margin-bottom:6px;">
@@ -551,7 +594,7 @@ class LT_Vendor_Dashboard {
                         <input type="radio" name="lt_ship_handling_type" value="percent" <?php checked( $handling_type, 'percent' ); ?>> Percentage (%)
                     </label>
                 </div>
-                <div id="lt-handling-amount-wrap" style="margin-top:6px;<?php echo $handling_type === 'none' ? 'display:none;' : ''; ?>">
+                <div id="lt-handling-amount-wrap" style="margin-top:6px;<?php echo esc_attr( $handling_type === 'none' ? 'display:none;' : '' ); ?>">
                     <input type="number" name="lt_ship_handling_amount"
                            value="<?php echo esc_attr( $handling_amount ); ?>"
                            min="0" step="0.01" placeholder="e.g. 2.50"
@@ -566,7 +609,7 @@ class LT_Vendor_Dashboard {
                 <input type="radio" name="lt_ship_mode" value="flat" <?php checked( $mode, 'flat' ); ?>>
                 <strong>Flat Rate</strong> — charge a fixed fee per shipment
             </label>
-            <div id="lt-flat-options" style="margin-left:24px;margin-bottom:12px;<?php echo $mode !== 'flat' ? 'display:none;' : ''; ?>">
+            <div id="lt-flat-options" style="margin-left:24px;margin-bottom:12px;<?php echo esc_attr( $mode !== 'flat' ? 'display:none;' : '' ); ?>">
                 <label style="display:block;margin-bottom:6px;">
                     Label shown to customer:
                     <input type="text" name="lt_ship_flat_label" value="<?php echo esc_attr( $flat_label ); ?>"
@@ -689,12 +732,12 @@ class LT_Vendor_Dashboard {
         $txn       = $shippo->buy_label( $rate_id, $label_fmt );
 
         if ( is_wp_error( $txn ) ) {
-            error_log( '[LT Shipping] Shippo buy_label error for order ' . $order_id . ': ' . $txn->get_error_message() . ' | data: ' . wp_json_encode( $txn->get_error_data() ) );
+            error_log( '[LT Shipping] Shippo buy_label error for order ' . $order_id . ': ' . $txn->get_error_code() );
             wp_send_json_error( 'Label purchase failed. Please check your Shippo account and try again.' );
         }
 
         if ( ( $txn['status'] ?? '' ) !== 'SUCCESS' ) {
-            error_log( '[LT Shipping] Shippo buy_label non-success for order ' . $order_id . ': ' . wp_json_encode( $txn['messages'] ?? [] ) );
+            error_log( '[LT Shipping] Shippo buy_label non-success for order ' . $order_id );
             wp_send_json_error( 'Label purchase failed. Please check your Shippo account and try again.' );
         }
 
@@ -715,9 +758,10 @@ class LT_Vendor_Dashboard {
         }
 
         $order = wc_get_order( $order_id );
-        update_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, $label_url );
-        update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
-        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order->update_meta_data( '_lt_shippo_label_url_' . $vendor_id, $label_url );
+        $order->update_meta_data( '_lt_shippo_tracking_' . $vendor_id, $tracking_num );
+        $order->update_meta_data( '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order->save();
 
         self::record_shipment( $order, $carrier, $tracking_num, $notify );
 
@@ -758,8 +802,8 @@ class LT_Vendor_Dashboard {
         global $wpdb;
         $wpdb->query( $wpdb->prepare(
             "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
-            '_transient_lt_rates_%',
-            '_transient_timeout_lt_rates_%'
+            $wpdb->esc_like( '_transient_lt_rates_' ) . '%',
+            $wpdb->esc_like( '_transient_timeout_lt_rates_' ) . '%'
         ) );
 
         wp_send_json_success();
@@ -770,9 +814,12 @@ class LT_Vendor_Dashboard {
     // -------------------------------------------------------------------------
 
     public static function ajax_mark_shipped(): void {
-        $order_id  = absint( $_POST['order_id'] ?? 0 );
+        $order_id = absint( $_POST['order_id'] ?? 0 );
+        if ( ! $order_id ) {
+            wp_send_json_error( 'Missing parameters.' );
+        }
 
-        // Verify nonce immediately using the order_id (only absint applied — safe to use here).
+        // Verify nonce BEFORE processing any other input.
         check_ajax_referer( 'lt_mark_shipped_' . $order_id, 'nonce' );
 
         $vendor_id = absint( $_POST['vendor_id'] ?? 0 );
@@ -789,7 +836,9 @@ class LT_Vendor_Dashboard {
             wp_send_json_error( 'Unauthorized.' );
         }
 
-        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order = wc_get_order( $order_id );
+        $order->update_meta_data( '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order->save();
 
         wp_send_json_success();
     }
@@ -833,8 +882,9 @@ class LT_Vendor_Dashboard {
             }
         }
 
-        update_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, $tracking );
-        update_post_meta( $order_id, '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order->update_meta_data( '_lt_shippo_tracking_' . $vendor_id, $tracking );
+        $order->update_meta_data( '_lt_manually_shipped_' . $vendor_id, 1 );
+        $order->save();
 
         self::record_shipment( $order, $carrier, $tracking, $notify );
 

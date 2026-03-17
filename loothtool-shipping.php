@@ -27,8 +27,10 @@ add_action( 'plugins_loaded', function() {
     require_once LT_SHIPPING_PATH . 'includes/class-cart-packages.php';
     require_once LT_SHIPPING_PATH . 'includes/class-admin-settings.php';
     require_once LT_SHIPPING_PATH . 'includes/class-vendor-dashboard.php';
+    require_once LT_SHIPPING_PATH . 'includes/class-packing-slip.php';
     require_once LT_SHIPPING_PATH . 'includes/class-order-labels.php';
     require_once LT_SHIPPING_PATH . 'includes/class-product-video.php';
+    require_once LT_SHIPPING_PATH . 'includes/class-product-carriers.php';
 
     // Register the custom shipping method with WooCommerce.
     add_filter( 'woocommerce_shipping_methods', function( $methods ) {

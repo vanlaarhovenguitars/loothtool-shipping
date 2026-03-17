@@ -122,6 +122,16 @@ class LT_Shippo_Shipping_Method extends WC_Shipping_Method {
             } ) );
         }
 
+        // Filter by per-product carrier restrictions (intersect across items in package).
+        if ( class_exists( 'LT_Product_Carriers' ) ) {
+            $product_carriers = LT_Product_Carriers::get_package_carriers( $package );
+            if ( ! empty( $product_carriers ) ) {
+                $rates = array_values( array_filter( $rates, function( $r ) use ( $product_carriers ) {
+                    return in_array( $r['provider'] ?? '', $product_carriers, true );
+                } ) );
+            }
+        }
+
         if ( empty( $rates ) ) {
             return;
         }

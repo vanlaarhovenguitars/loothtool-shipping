@@ -88,7 +88,7 @@ class LT_Order_Labels {
         if ( is_wp_error( $rates ) ) {
             // Log full Shippo error server-side; return only a generic message to the client
             // to prevent leaking internal API details, field names, or account structure.
-            error_log( '[LT Shipping] Shippo get_rates error for order ' . $order_id . ': ' . $rates->get_error_message() . ' | data: ' . wp_json_encode( $rates->get_error_data() ) );
+            error_log( '[LT Shipping] Shippo get_rates error for order ' . $order_id . ': ' . $rates->get_error_code() );
             wp_send_json_error( 'Unable to fetch shipping rates. Please check your store address and try again.' );
         }
 
@@ -132,7 +132,7 @@ class LT_Order_Labels {
             $product_id = $item->get_product_id();
             $vendor_id  = (int) get_post_field( 'post_author', $product_id );
             if ( $vendor_id && ! isset( $vendors[ $vendor_id ] ) ) {
-                $tracking = get_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, true );
+                $tracking = $order->get_meta( '_lt_shippo_tracking_' . $vendor_id );
                 if ( $tracking ) {
                     $store      = dokan_get_store_info( $vendor_id );
                     $store_name = $store['store_name'] ?? 'Vendor';
@@ -182,8 +182,8 @@ class LT_Order_Labels {
 
         foreach ( $order->get_items() as $item ) {
             $vendor_id = (int) get_post_field( 'post_author', $item->get_product_id() );
-            $label_url = get_post_meta( $order_id, '_lt_shippo_label_url_' . $vendor_id, true );
-            $tracking  = get_post_meta( $order_id, '_lt_shippo_tracking_' . $vendor_id, true );
+            $label_url = $order->get_meta( '_lt_shippo_label_url_' . $vendor_id );
+            $tracking  = $order->get_meta( '_lt_shippo_tracking_' . $vendor_id );
 
             if ( $label_url ) {
                 $found = true;

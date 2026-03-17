@@ -211,7 +211,7 @@ class LT_Vendor_Credentials {
     }
 
     public static function ajax_remove(): void {
-        check_ajax_referer( 'lt_vendor_creds', 'nonce' );
+        check_ajax_referer( 'lt_vendor_creds', 'lt_creds_nonce' );
 
         $vendor_id = (int) dokan_get_current_user_id();
         if ( ! $vendor_id ) {
